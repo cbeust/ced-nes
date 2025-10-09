@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "cpu",
+    "nes"
+]
+resolver = "2"
