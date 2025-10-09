@@ -15,3 +15,11 @@
 <img src="https://github.com/user-attachments/assets/f4b7df2c-64ac-42d9-91bf-e697707bd5e6" width=40% />
 </p>
 
+Mappers supported:
+
+- MMC1 (1)
+- UxROM (2)
+- CNRom (3)
+- MMC3 (4)
+- AxROM (7)
+
