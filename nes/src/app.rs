@@ -1,0 +1,574 @@
+use crate::color::PALETTE_TUPLES;
+use crate::constants::{RomInfo, *};
+use crate::emulator::{Emulator, FRAME};
+use crate::joypad::{Button, Joypad};
+use crate::rom_list::create_rom_item;
+use crate::Args;
+use iced::alignment::Horizontal;
+use iced::keyboard::Key;
+use iced::mouse::Cursor;
+use iced::widget::button::danger;
+use iced::widget::canvas::{Cache, Fill, Geometry, Program};
+use iced::widget::{Canvas, Column, Row, };
+use iced::*;
+use iced::{
+    widget::{button, column, container, row, scrollable, text, text_input},
+    Alignment, Application, Settings
+};
+use iced_futures::backend::default::time::every;
+use iced_futures::core::SmolStr;
+use iced_futures::Subscription;
+use rand::Rng;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
+use std::time::{Duration, Instant};
+use tokio::sync::broadcast::{Receiver, Sender};
+use tracing::{debug, info};
+
+pub struct App {
+    args: Args,
+    // Drawing
+    cache: Cache,
+    // State shared by the app and the emulator
+    shared_state: Arc<RwLock<SharedState>>,
+    // This sender is also used to create a receiver
+    sender_to_ui: Sender<ToUiMessage>,
+    sender_to_emulator: Sender<ToEmulatorMessage>,
+    joypad: Arc<RwLock<Joypad>>,
+    roms: Vec<RomInfo>,
+    selected_rom_index: usize,
+    filter_text: String,
+}
+
+pub struct SharedState {
+    pub title: String,
+    pub _joypad1: String,
+    pub rom_name: String,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self {
+            title: String::from(WINDOW_TITLE),
+            _joypad1: String::from("Joypad 1"),
+            rom_name: "".into(),
+        }
+    }
+}
+
+// Then in your main code:
+
+impl App {
+    pub fn new(args: Args,
+        shared_state: Arc<RwLock<SharedState>>,
+        roms: Vec<RomInfo>, selected_rom_id: usize,
+        sender_to_ui: Sender<ToUiMessage>,
+        sender_to_emulator: Sender<ToEmulatorMessage>,
+        joypad: Arc<RwLock<Joypad>>)
+        -> Self
+    {
+        Self {
+            args,
+            shared_state,
+            joypad,
+            cache: Cache::default(),
+            sender_to_ui,
+            sender_to_emulator,
+            roms,
+            selected_rom_index: selected_rom_id,
+            filter_text: String::new(),
+        }
+    }
+
+    pub fn subscription(&self) -> Subscription<AppMessage> {
+        let rec = self.sender_to_ui.clone().subscribe();
+        let cpu = iced_futures::futures::stream::unfold(
+            (rec, Arc::new(Mutex::new(String::new()))),
+            |(mut receiver, state)| async move {
+                let mut result = None;
+                if let Ok(m) = receiver.recv().await {
+                    use ToUiMessage::*;
+                    match m {
+                        Update(frequency, fps) => {
+                            result = Some(AppMessage::Update(frequency, fps));
+                        }
+                    }
+                }
+
+                Some((result.unwrap_or(AppMessage::Ignored), (receiver, state)))
+            }
+        );
+        let cpu2 = Subscription::run_with_id(42, cpu);
+
+        let mut subscriptions = vec![
+            // sub1,
+            event::listen().map(AppMessage::GlobalEvent),
+            cpu2,
+            // every,
+            // window::close_events().map(WindowClosed),
+            // stream,
+        ];
+
+        if self.args.demo {
+            let every = every(Duration::from_secs(DEMO_DELAY_SECONDS))
+                .map(move |_| AppMessage::RebootRandom);
+            subscriptions.push(every);
+        }
+
+        Subscription::batch(subscriptions)
+    }
+}
+
+// impl iced::daemon::Title<App> for App {
+//     fn title(&self, state: &App, _window_id: window::Id) -> String {
+//         let title = self.shared_state.read().unwrap().title.clone();
+//         println!("TITLE: {title}");
+//         title
+//     }
+// }
+
+#[derive(Debug, Clone)]
+pub enum AppMessage {
+    MainWindowOpened(window::Id),
+    WindowClosed,
+    Ignored,
+    Tick,
+    GlobalEvent(Event),
+    // Frequency, FPS
+    Update(f32, u16),
+    RomSelected(usize),
+    Reboot,
+    Debug,
+    RebootRandom,
+    FilterTextChanged(String),
+}
+
+#[derive(Copy, Clone)]
+pub enum ToUiMessage {
+    // Frequency, FPS
+    Update(f32, u16),
+}
+
+#[derive(Clone)]
+pub enum ToEmulatorMessage {
+    Reboot(RomInfo),
+    Debug,
+}
+
+#[derive(Default)]
+pub struct CanvasState {}
+
+impl Program<AppMessage> for App {
+    type State = CanvasState;
+
+    fn draw(&self, _state: &Self::State, renderer: &Renderer, _theme: &Theme, bounds: Rectangle,
+        _cursor: Cursor) -> Vec<Geometry<Renderer>>
+    {
+        let mut result = Vec::new();
+
+        // info!("DRAWING");
+        // info!("Drawing, pixel at 1,6: {:#?}", self.frame.get_pixel(1,6));
+        let geometry = self.cache.draw(renderer, bounds.size(), |frame| {
+            // let fill = Fill::from(Color::from_rgb(1.0, 0.0, 0.0));
+            // let bg = Path::rectangle(bounds.position(), bounds.size());
+            // frame.fill(&bg, fill);
+
+            // frame.scale(5.0);
+            let mut offset = 0;
+            let scale_x = SCALE_X;
+            let scale_y = SCALE_Y * 1.0;
+            unsafe {
+                for (index, color) in FRAME.iter().enumerate() {
+                    let rgb = PALETTE_TUPLES[*color as usize];
+                    let fill = Fill::from(Color::from_rgb8(rgb.0, rgb.1, rgb.2));
+                    let x = index % 256;
+                    let y = index / 256;
+                    let xx = offset + scale_x as usize * x;
+                    let yy = scale_y as usize * y;
+                    // if x < 8 * scale as usize && y < 8 * scale as usize {
+                    //     info!("Drawing {x},{y} = {},{},{}", rgb.0, rgb.1, rgb.2);
+                    // }
+                    let size = Size::new(scale_x, scale_y);
+                    let top_left = Point::new(xx as f32, yy as f32);
+                    frame.fill_rectangle(top_left, size, fill);
+                    // let path = Path::rectangle(top_left, size);
+                    // frame.fill(&path, fill);
+                }
+            }
+            offset += 8 * scale_x as usize;
+        });
+
+        result.push(geometry);
+        self.cache.clear();
+        result
+    }
+}
+
+impl App {
+    pub fn title(&self) -> String {
+        self.shared_state.read().unwrap().title.clone()
+    }
+
+    pub fn update(&mut self, message: AppMessage) -> Task<AppMessage> {
+        use AppMessage::*;
+        match message {
+            MainWindowOpened(id) => {
+                info!("Main NES window opened, id: {id:#?}");
+            }
+            Tick => {}
+            WindowClosed => {
+                println!("Window closed");
+                std::process::exit(0);
+            }
+            Ignored => {
+            }
+            GlobalEvent(event) => {
+                if let Event::Keyboard(keyboard_event) = event {
+                    match keyboard_event {
+                        // Handle key press events
+                        keyboard::Event::KeyPressed { key, .. } => {
+                            self.key_pressed(key);
+                        }
+                        keyboard::Event::KeyReleased { key, .. } => {
+                            self.key_released(key);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Update(frequency, fps) => {
+                if let Ok(mut state) = self.shared_state.write() {
+                    let rom_name = state.rom_name.clone();
+                    state.title = format!("{} - {:.02} Mhz - {fps} FPS - {rom_name}",
+                        WINDOW_TITLE, frequency);
+                }
+            }
+            RomSelected(rom_id) => {
+                self.selected_rom_index = rom_id;
+                info!("Selected ROM at index {}", rom_id);
+            }
+            Reboot => {
+                // self.shared_state.write().unwrap().selected_rom_index = index;
+                // let _ = self.sender.send(
+                //     CpuMessage::Reboot(self.shared_state.write().unwrap().selected_rom_index));
+                info!("Requesting reboot");
+                let rom_info = self.roms[self.selected_rom_index].clone();
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::Reboot(rom_info));
+            }
+            Debug => {
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::Debug);
+            }
+            RebootRandom => {
+                let random = rand::thread_rng().gen_range(0..self.roms.len());
+                self.selected_rom_index = random;
+                let rom_info = self.roms[random].clone();
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::Reboot(rom_info));
+            }
+            FilterTextChanged(text) => {
+                self.filter_text = text;
+            }
+        }
+
+        Task::done(Ignored)
+    }
+
+    // fn create_list_item(item: &str, id: usize, is_selected: bool) -> Element<AppMessage> {
+    //     let item_content = column![
+    //         text(item)
+    //             .size(14)
+    //             // .style(Text::Color(Color::from_rgb(0.1, 0.1, 0.1))),
+    //         ]
+    //         .spacing(5);
+    //
+    //     let container_content = row![
+    //         item_content.width(Length::FillPortion(3)),
+    //     ]
+    //     .align_y(Alignment::Center);
+    //
+    //     let container = container(container_content)
+    //         // .padding(10)
+    //         .width(Length::Fill);
+    //
+    //     // Apply different styling for selected items
+    //     let styled_container = if is_selected {
+    //         container.style(|theme| {
+    //             container::Style {
+    //                 text_color: Some(red().into()),
+    //                 ..Default::default()
+    //             }
+    //         })
+    //     } else {
+    //         container
+    //     };
+    //
+    //     // Make the container clickable
+    //     button(styled_container)
+    //         .on_press(AppMessage::RomSelected(id))
+    //         .width(Length::Fill)
+    //         .into()
+    // }
+
+    fn rom_info_box(&self) -> Element<AppMessage> {
+        let current_rom = &self.roms[self.selected_rom_index];
+        let mapper_num_str = current_rom.mapper_number().to_string();
+        
+        let info_content = row![
+            text(current_rom.name())
+                .size(18)
+                .style(|_theme| text::Style { color: Some(Color::from_rgb(1.0, 1.0, 1.0)) })
+                .width(Length::Fill),
+            text(mapper_num_str)
+                .size(12)
+                .style(|_theme| text::Style { color: Some(Color::from_rgb(1.0, 1.0, 0.0)) })
+        ]
+        .align_y(iced::Alignment::Start)
+        .spacing(20)
+        .padding(15);
+
+        container(info_content)
+            .style(|_theme| {
+                container::Style {
+                    background: Some(Color::from_rgb(0.25, 0.35, 0.45).into()),
+                    border: Border {
+                        color: Color::from_rgb(0.5, 0.6, 0.7),
+                        width: 2.0,
+                        radius: 8.0.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .width(Length::Fill)
+            .into()
+    }
+
+    fn rom_list(&self) -> Element<AppMessage> {
+        let items_column = self.roms.iter().enumerate()
+            .filter(|(_, rom)| {
+                if self.filter_text.is_empty() {
+                    true
+                } else {
+                    rom.name().to_lowercase().contains(&self.filter_text.to_lowercase())
+                }
+            })
+            .fold(
+                column![].spacing(2),
+                |col, (index, it)| {
+                    let item = it.clone();
+                    let is_selected = index == self.selected_rom_index;
+                    col.push(create_rom_item(is_selected, item).map(move |message| {
+                        match message {
+                            crate::listview::Message::ItemClicked(_) => AppMessage::RomSelected(index),
+                            _ => AppMessage::Ignored,
+                        }
+                    }))
+                }
+            );
+
+        container(
+            scrollable(items_column)
+                .width(Length::Fill)
+                .height(Length::Fill)
+        )
+        .style(|_theme| {
+            container::Style {
+                background: Some(Color::from_rgb(0.4, 0.4, 0.4).into()),
+                ..Default::default()
+            }
+        })
+        .into()
+    }
+
+    fn rom_panel(&self) -> Element<AppMessage> {
+        let filter_input = text_input("Filter ROMs...", &self.filter_text)
+            .on_input(AppMessage::FilterTextChanged)
+            .padding(10)
+            .size(16);
+
+        column![
+            self.rom_info_box(),
+            filter_input,
+            self.rom_list()
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    pub fn view(&self) -> Element<AppMessage> {
+        let canvas = Canvas::new(self)
+            .width(Length::Fixed(WIDTH as f32 * SCALE_X))
+            .height(Length::Fixed(HEIGHT as f32 * SCALE_Y));
+
+        let buttons = container(Column::new()
+            .spacing(10)
+            .push(m_button("Reboot", AppMessage::Reboot).style(danger))
+            .push(m_button("Debug", AppMessage::Debug).style(danger)))
+            .style(|_theme| {
+                container::Style {
+                    background: Some(Color::from_rgb(0.6, 0.6, 0.6).into()),
+                    ..Default::default()
+                }
+            })
+            .width(Shrink)
+            .height(Shrink);
+
+        let row = Row::new()
+            .spacing(10)
+            .push(canvas)
+            .push(buttons)
+            .push(self.rom_panel())
+            ;
+
+        let mut column= Column::new();
+        // column = column.push(text("NES Emulator").size(50));
+        column = column.push(row);
+
+        container(column)
+            .style(|_theme| {
+                container::Style {
+                    background: Some(Color::from_rgb(0.2, 0.2, 0.2).into()),
+                    ..Default::default()
+                }
+            })
+            .into()
+    }
+
+    fn key_to_button(key: Key<SmolStr>) -> Option<Button> {
+        let mut result = None;
+        use iced::keyboard::key::Named;
+        match key {
+            Key::Named(named) => {
+                match named {
+                    Named::Enter => { result = Some(Button::Select) }
+                    Named::Space => { result = Some(Button::Start) }
+                    Named::ArrowUp => { result = Some(Button::Up) }
+                    Named::ArrowDown => { result = Some(Button::Down) }
+                    Named::ArrowLeft => { result = Some(Button::Left) }
+                    Named::ArrowRight => { result = Some(Button::Right) }
+                    _ => {}
+                }
+            }
+            Key::Character(c) => {
+                if c == "a" { result = Some(Button::A); }
+                else if c == "b" { result = Some(Button::B); }
+            }
+            Key::Unidentified => {}
+        }
+        result
+    }
+
+    fn key_pressed(&mut self, key: Key<SmolStr>) {
+        // info!("Key pressed: {key:#?}");
+        if let Some(button) = Self::key_to_button(key) {
+            self.joypad.write().unwrap().set_button_status(button, true);
+        }
+    }
+
+    fn key_released(&mut self, key: Key<SmolStr>) {
+        // info!("Key released: {key:#?}");
+        if let Some(button) = Self::key_to_button(key) {
+            self.joypad.write().unwrap().set_button_status(button, false);
+        }
+    }
+}
+
+pub fn launch_emulator(mut args: Args, mut rom_info: RomInfo,
+    sender: Sender<ToUiMessage>, mut receiver: Receiver<ToEmulatorMessage>) ->
+    (Arc<RwLock<SharedState>>, Arc<RwLock<Joypad>>)
+{
+    let shared_state = Arc::new(RwLock::new(SharedState::default()));
+    let shared_state2 = shared_state.clone();
+
+    let joypad = Arc::new(RwLock::new(Joypad::new()));
+    let joypad2 = joypad.clone();
+    let _ = thread::Builder::new()
+        .name("NES emulator thread".to_string())
+        .spawn(move|| {
+        let mut reboot = false;
+        loop {
+            let mut emulator = Emulator::new(rom_info.clone(),
+                shared_state.clone(), joypad2.clone(), args.clone());
+            let mut one_second_start = Instant::now();
+            let mut one_second_cycles = 0;
+            let mut frequency_start = Instant::now();
+            let mut frequency_cycles = 0;
+
+            while ! reboot {
+                let cycles = emulator.tick();
+                one_second_cycles += cycles;
+                frequency_cycles += cycles;
+
+                // Refresh the frequency display every second
+                if one_second_start.elapsed().as_millis() > 1000 {
+                    let frames = emulator.frame_stats.len();
+                    let frequency = one_second_cycles as f32 / 1_000_000.0;
+                    let _ = sender.send(ToUiMessage::Update(frequency, frames as u16));
+                    emulator.frame_stats.clear();
+                    one_second_cycles = 0;
+                    one_second_start = Instant::now();
+                }
+
+                if let Some(cap) = CAP_FPS {
+                    // If CAP_FPS is set to 60 and the divider is 10, we want
+                    // to run 6 (FPS / divider) frames every 100 (1000 / 10) milliseconds
+                    // The higher the divider, the smoother the scrolling, up to a point
+                    // (if the divider is too high, it makes the emulator uncapped)
+                    let divider = 30_u128;
+                    let frame_cap = cap as u128 / divider;
+                    let time_wait_ms = 1000 / divider;
+                    let frame_count = emulator.frame_count.len();
+                    if frame_count >= frame_cap as usize {
+                        let elapsed = emulator.frame_count_last.elapsed().as_millis();
+                        if elapsed < time_wait_ms {
+                            let sleep_ms = time_wait_ms - elapsed;
+                            thread::sleep(Duration::from_millis((sleep_ms) as u64));
+                            emulator.frame_count = Vec::new();
+                            emulator.frame_count_last = Instant::now();
+                        }
+                    }
+                }
+
+                while let Ok(m) = receiver.try_recv() {
+                    match m {
+                        ToEmulatorMessage::Reboot(ri) => {
+                            info!("Emulator rebooting with {ri:#?})");
+                            reboot = true;
+                            rom_info = ri;
+                        }
+                        ToEmulatorMessage::Debug => {
+                            emulator.debug();
+                        }
+                    }
+                }
+            }
+            reboot = false;
+        }
+    });
+
+    (shared_state2, joypad)
+}
+
+/// A bigger and round button
+pub fn m_button(label: &str, message: AppMessage) -> iced::widget::Button<'_, AppMessage> {
+    let b = button(
+        text(label)
+            .align_x(Horizontal::Center)
+            .size(20.0)
+            .width(Length::Fixed(75.0)))
+        // TODO: restore the green/yellow buttons
+        // .style(iced::theme::Button::Custom(Box::new(MyButtonStyle)))
+        .on_press(message);
+
+    let mut border = Border::default();
+    border.width = 3.0;
+    border.color = Color::WHITE;
+    b
+    // .padding(10.0)
+    // .style(
+    //     container::Appearance {
+    //         text_color: Some(BUTTON_TEXT),
+    //         // background: Some(iced::Background::Color(Color::from_rgb8(0.8, 0.0, 0.0))),
+    //         border,
+    //         ..Default::default()
+    //     }
+    // )
+}
