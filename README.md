@@ -8,3 +8,18 @@
 <img width="906" height="506" alt="image" src="https://github.com/user-attachments/assets/8a464853-3ab8-4ada-9828-29aa10e7ce54" />
 
 
+<p align="center">
+<img src="https://github.com/user-attachments/assets/8f71231c-8a7c-47ca-9d4b-ffb669c83ecb" width=40% />
+<img src="https://github.com/user-attachments/assets/886c56e9-f232-4785-914c-7ecfad39a92d" width=40% />
+<img src="https://github.com/user-attachments/assets/92282c1d-8f0e-4e6e-b96b-6ec2a4980c6b" width=40% />
+<img src="https://github.com/user-attachments/assets/f4b7df2c-64ac-42d9-91bf-e697707bd5e6" width=40% />
+</p>
+
+Mappers supported:
+
+- MMC1 (1)
+- UxROM (2)
+- CNRom (3)
+- MMC3 (4)
+- AxROM (7)
+
