@@ -17,6 +17,8 @@ pub struct MapperConfig {
     pub(crate) mirroring: Mirroring,
     pub(crate) is_custom_chr: bool,
     pub(crate) is_custom_prg: bool,
+    pub(crate) is_custom_nametable: bool,
+    pub(crate) on_read_chr_hook: bool,
 }
 
 impl Default for MapperConfig {
@@ -35,6 +37,8 @@ impl Default for MapperConfig {
             mirroring: Mirroring::Horizontal,
             is_custom_chr: false,
             is_custom_prg: false,
+            is_custom_nametable: false,
+            on_read_chr_hook: false,
         }
     }
 }
@@ -78,12 +82,12 @@ impl MapperConfig {
         self.mirroring = mirroring;
     }
 
-    pub fn set_is_custom_chr(&mut self, is_custom_chr: bool) {
-        self.is_custom_chr = is_custom_chr;
+    pub fn set_is_custom_chr(&mut self, is_custom: bool) {
+        self.is_custom_chr = is_custom;
     }
 
-    pub fn set_is_custom_prg(&mut self, is_custom_prg: bool) {
-        self.is_custom_prg = is_custom_prg;
+    pub fn set_is_custom_prg(&mut self, is_custom: bool) {
+        self.is_custom_prg = is_custom;
     }
 
     pub fn get_chr_bank_count(&self) -> usize {
@@ -92,5 +96,9 @@ impl MapperConfig {
 
     pub fn get_prg_bank_count(&self) -> usize {
         self.total_prg_rom_size / self.prg_bank_size
+    }
+
+    pub fn set_is_custom_nametable(&mut self, is_custom: bool) {
+        self.is_custom_nametable = is_custom;
     }
 }

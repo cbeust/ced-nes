@@ -2,77 +2,110 @@ use std::{fs, thread};
 use std::fs::File;
 use std::io::Write;
 use std::string::ToString;
-use std::sync::RwLock;
+use std::sync::{Arc, OnceLock, RwLock};
 use crossbeam::channel::{Sender, unbounded};
-use lazy_static::lazy_static;
+use tracing::info;
+use crate::external_logger::IExternalLogger;
+use crate::labels::Labels;
+use crate::messages::LogMsg;
+use crate::operand::Operand;
 
-struct LogFile {
-    _buffer: Vec<String>,
+pub struct LogFile {
+    buffer: Arc<RwLock<Vec<String>>>,
+    asyn: bool,
     tx: Sender<LogMessage>,
 }
 
 const NL: &[u8] = "\n".as_bytes();
 
+static LABELS: OnceLock<Labels> = OnceLock::new();
+static OPERANDS: OnceLock<[Operand; 256]> = OnceLock::new();
+
 enum LogMessage {
-    LogLine(String)
+    NewLog(LogMsg, bool)
 }
 
 impl LogFile {
-    fn new(file_name: &str) -> Self {
+    pub(crate) fn new(file_name: &str, logger: Arc<RwLock<Option<Box<dyn IExternalLogger + 'static>>>>,
+        asyn: bool, labels: &Labels, operands: [Operand; 256])
+        -> Self
+    {
+        let _ = LABELS.get_or_init(|| labels.clone());
+        let _ = OPERANDS.get_or_init(|| operands);
         let c = unbounded();
-        let fn2 = file_name.to_string();
-
-        match File::create(file_name.clone()) {
-            Ok(_) => { }
-            Err(error) => {
-                panic!("Couldn't create file {}: {}", &file_name, error);
-            }
-        };
-
-        let result = Self {
-            _buffer: Vec::new(),
-            tx: c.0,
-        };
-
-        thread::spawn(move || {
-            let mut buffer: Vec<String> = Vec::new();
-            let mut stop = false;
-            while ! stop {
-                match c.1.recv() {
-                    Ok(m) => {
-                        match m {
-                            LogMessage::LogLine(_) => {
-                                LogFile::receive_log(&mut buffer, &fn2);
+        let buffer = Arc::new(RwLock::new(Vec::new()));
+        if asyn {
+            match File::create(file_name.clone()) {
+                Ok(_) => {}
+                Err(error) => {
+                    panic!("Couldn't create file {}: {}", &file_name, error);
+                }
+            };
+            let buffer2 = buffer.clone();
+            let file_name2 = file_name.to_string();
+            // let mut logger2 = logger.clone();
+            let logger = logger.clone();
+            let receiver = c.1.clone();
+            thread::spawn(move || {
+                let mut stop = false;
+                while !stop {
+                    match receiver.recv() {
+                        Ok(m) => {
+                            match m {
+                                LogMessage::NewLog(log_msg, asyn) => {
+                                    Self::received_new_log(
+                                        &mut logger.write().unwrap().as_mut().unwrap(),
+                                        buffer2.clone(), log_msg,
+                                        file_name2.clone(), asyn);
+                                }
                             }
                         }
+                        Err(_) => { stop = true; }
                     }
-                    Err(_) => { stop = true; }
                 }
+            });
+
+        };
+
+        Self {
+            buffer,
+            // logger,
+            asyn,
+            tx: c.0,
+        }
+    }
+
+    pub fn log(&mut self, log_msg: LogMsg) {
+        self.tx.send(LogMessage::NewLog(log_msg, self.asyn)).unwrap();
+    }
+
+    fn received_new_log(logger: &mut Box<dyn IExternalLogger>,
+        buffer: Arc<RwLock<Vec<String>>>, log_msg: LogMsg, file_name: String, asyn: bool)
+    {
+        let strings = logger.log(log_msg, LABELS.get().unwrap(),
+            OPERANDS.get().unwrap());
+        if asyn {
+            for s in strings {
+                buffer.write().unwrap().push(s);
             }
-        });
-
-        result
-    }
-
-    fn log(&mut self, s: String) {
-        let _ = self.tx.send(LogMessage::LogLine(s));
-    }
-
-    fn receive_log(buffer: &mut Vec<String>, file_name: &str) {
-        // buffer.push(s.to_string());
-        if buffer.len() > 10_000 {
-            match fs::OpenOptions::new().append(true).open(&file_name) {
-                Ok(mut file) => {
-                    for l in &mut *buffer {
-                        file.write_all(l.as_bytes()).expect("Couldn't write to file");
+            let b = buffer.read().unwrap();
+            if b.len() > 100_000 {
+                match fs::OpenOptions::new().append(true).open(&file_name) {
+                    Ok(mut file) => {
+                        file.write_all(b.join("\n").as_bytes())
+                            .expect("Can write to file");
                         file.write_all(NL).unwrap();
                     }
+                    Err(error) => {
+                        panic!("Couldn't append to file {}: {}", file_name, error);
+                    }
                 }
-                Err(error) => {
-                    panic!("Couldn't append to file {}: {}", file_name, error);
-                }
+                buffer.write().unwrap().clear();
             }
-            buffer.clear();
+        } else {
+            for s in strings {
+                info!(target: "asm", "{s}");
+            }
         }
     }
 

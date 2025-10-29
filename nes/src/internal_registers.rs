@@ -127,25 +127,6 @@ impl IR {
     pub fn nametable(&self) -> u16 {
         (self.v & 0b11_00000_00000) >> 10
     }
-
-    pub fn _attribute_address(&self) -> u16 {
-        let v = self.v;
-        // Extract components from v register
-        let nametable = (v >> 10) & 0x03;      // Bits 11-10
-        let coarse_y = (v >> 5) & 0x1F;        // Bits 9-5
-        let coarse_x = v & 0x1F;               // Bits 4-0
-
-        // Calculate attribute table base address
-        let base_address = 0x2000 + (nametable * 0x400);
-        let attribute_base = base_address + 0x3C0;  // Attribute table offset
-
-        // Each attribute byte covers 4x4 tiles (32x32 pixels)
-        let attr_x = coarse_x / 4;
-        let attr_y = coarse_y / 4;
-
-        // Attribute address within the 64-byte attribute table
-        attribute_base + (attr_y * 8) + attr_x
-    }
 }
 
 impl Display for IR {

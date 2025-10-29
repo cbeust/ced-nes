@@ -6,16 +6,16 @@ use lazy_static::lazy_static;
 use tracing::{debug, info};
 use cpu::config::Config;
 use cpu::cpu::Cpu;
+use cpu::external_logger::{DefaultLogger, IExternalLogger};
 use cpu::labels::Labels;
 use cpu::memory::Memory;
 use crate::app::SharedState;
 use crate::Args;
-use crate::constants::{RomInfo, DEBUG_ASM, HEIGHT, WIDTH};
+use crate::constants::{RomInfo, DEBUG_ASM, DEBUG_MESEN, HEIGHT, LOG_ASYNC, WIDTH};
 use crate::rom::Rom;
 use crate::joypad::Joypad;
-use crate::mappers::mapper0::Mapper0;
-use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_base::MapperBase;
+use crate::mesen_logger::MesenLogger;
 use crate::nes_memory::NesMemory;
 use crate::ppu::{Ppu, PpuResult};
 
@@ -56,16 +56,31 @@ impl Emulator {
         let rom = Rom::read_nes_file(&rom_info.file_name()).unwrap();
         let home_dir = std::env::home_dir().unwrap();
         let home_dir = home_dir.to_str().unwrap();
-        let labels =
-            Labels::from_file(&format!("{home_dir}\\rust\\sixty.rs\\nes\\AccuracyCoin.fns"))
-                .unwrap();
-        let labels = Labels::default();
+        // let labels =
+        //     Labels::from_file(&format!("{home_dir}\\rust\\sixty.rs\\nes\\AccuracyCoin.fns"))
+        //         .unwrap();
+        let mut labels = Labels::default();
+        [
+            (0x2000, "PpuControl_2000"),
+            (0x2001, "PpuMask_2001"),
+            (0x2002, "PpuStatus_2002"),
+            (0x2006, "PpuAddr_2006"),
+            (0x2007, "PpuData_2007"),
+            (0x2008, "PpuAddr_2008"),
+            (0x4000, "Sq0Duty_4000"),
+            (0x4010, "DmcFreq_4010"),
+            (0x4016, "Ctrl1_4016"),
+            (0x4017, "Ctrl2_FrameCtr_4017")
+        ].iter().for_each(|(k, v)| {
+            let _ = labels.insert(*k as u16, (*v).into());
+        });
         let config = Config {
             emulator_speed_hz: 16_000_000,
             debug_asm: DEBUG_ASM,
             pc_max: None,
             trace_to_file: None,
-            asynchronous_logging: false,
+            asynchronous_logging: LOG_ASYNC,
+            trace_file_asm: format!("{home_dir}\\t\\trace.txt"),
             labels,
             ..Default::default()
         };
@@ -73,11 +88,20 @@ impl Emulator {
         let ppu = Arc::new(RwLock::new(Ppu::new(&mut mapper)));
         let len = rom.prg_rom.len();
         debug!(target: "rom", "prg_rom length: {len:04X}");
+        let irq = ((rom.prg_rom[len - 1] as u16) << 8) | rom.prg_rom[len - 2] as u16;
         let pc = ((rom.prg_rom[len - 3] as u16) << 8) | rom.prg_rom[len - 4] as u16;
+        let nmi = ((rom.prg_rom[len - 5] as u16) << 8) | rom.prg_rom[len - 6] as u16;
+        debug!(target: "rom", "IRQ:{irq:04X} RESET:{pc:04X} NMI:{nmi:04X}");
         let mut nes_memory = NesMemory::new(mapper, joypad.clone(), ppu.clone());
         nes_memory.init = false;
-        let mut cpu = Cpu::new(nes_memory, None, config.clone());
+        let logger: Option<Box<dyn IExternalLogger>> = if DEBUG_MESEN {
+            Some(Box::new(MesenLogger::default()))
+        } else {
+            Some(Box::new(DefaultLogger::default()))
+        };
+        let mut cpu = Cpu::new(nes_memory, None, &config, logger);
         cpu.pc = pc;
+        cpu.s = 0xfd;
 
         let ppu2 = ppu.clone();
         Self {
@@ -99,11 +123,9 @@ impl Emulator {
 
     pub fn tick(&mut self) -> u128 {
         let mut cycles = 0;
-        for _ in 1..1000 {
+        for _ in 1..10_000 {
             cycles += self.tick_one().1;
         }
-        // let value: String = format!("{:02X}", self.cpu.memory.joypad.read().unwrap().read_status());
-        // (*self.shared_state.write().unwrap()).joypad1 = value;
         cycles
     }
 
@@ -123,7 +145,7 @@ impl Emulator {
         // Tick the CPU once
         //
         // self.cpu.step(&self.config, &HashSet::new());
-        let has_advanced = self.cpu.one_cycle(&self.config, &HashSet::new());
+        let has_advanced = self.cpu.one_cycle(&mut self.config, &HashSet::new());
         {
             let mut ppu = self.ppu.write().unwrap();
             ppu.ppu_ctrl = self.cpu.memory.ppu_ctrl;
@@ -249,7 +271,7 @@ impl Emulator {
                 let mut values = Vec::new();
                 for a in 0..16 {
                     values.push(self.ppu.read().unwrap()
-                        .get_vram((i as u16 + a as u16) as usize, &self.cpu.memory.mapper));
+                        .get_vram((i as u16 + a as u16) as usize, &mut self.cpu.memory.mapper));
                 }
 
                 line.push_str(&self.line(i as u16, &values));

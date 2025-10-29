@@ -6,16 +6,16 @@ use crate::labels::Labels;
 pub struct Operand {
     pub opcode: u8,
     pub size: u8,  // 1, 2, or 3 bytes
-    pub(crate) name: &'static str,
-    pub(crate) cycles: u8,
-    pub(crate) addressing_type: AddressingType,
+    pub name: &'static str,
+    pub cycles: u8,
+    pub addressing_type: AddressingType,
 }
 
 impl Operand {
     /// Returns the formatter string for this opcode with the (optional) given operands.
     /// * `pc`: The current PC, displayed on the left side
     /// * `byte1` and `byte2`: Possible data to the operands
-    pub(crate) fn disassemble(&self, pc: u16, b1: u8, b2: u8, labels: &Labels) -> String {
+    pub fn disassemble(&self, pc: u16, b1: u8, b2: u8, labels: &Labels) -> String {
         let result = match self.size {
             3 => {
                 format!("{:04X}: {:02X} {:02X} {:02X}   {} {}", pc,

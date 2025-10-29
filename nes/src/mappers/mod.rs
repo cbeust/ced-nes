@@ -7,3 +7,6 @@ pub mod mapper_axrom;
 mod mapper_cnrom;
 pub mod mapper_base;
 mod mapper_config;
+mod mapper_gxrom;
+mod mapper19;
+mod mapper_mmc2;

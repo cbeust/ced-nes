@@ -1,10 +1,15 @@
 use std::fs::File;
+use rolling_file::{BasicRollingFileAppender, RollingConditionBasic, RollingFileAppender};
+use tracing_appender::non_blocking;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::filter::FilterExt;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use crate::constants::*;
 use crate::ppu::{CURRENT_CYCLE, CURRENT_SCANLINE};
 
-pub fn init_logging(log_to_file: Option<String>) {
+pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGuard> {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt::{format::Writer, FmtContext, FormatEvent, FormatFields};
     use tracing_subscriber::registry::LookupSpan;
@@ -53,30 +58,37 @@ pub fn init_logging(log_to_file: Option<String>) {
         "info,{vbl_s},{ir_s},{vram_s},{rom_s},{mapper_s},ppu=off,sleep=off,oam=off,4014=off,frame=off,{ice_logs_off}"));
 
     if let Some(file_name) = log_to_file {
-        // Create the directory if it doesn't exist
         let dir = format!("{}\\t", dirs::home_dir().unwrap().to_str().unwrap());
         std::fs::create_dir_all(&dir).unwrap();
-        let full_path = &format!("{}/{}", dir, file_name);
-        let file = File::create(full_path).unwrap();
-
-        let file_layer = tracing_subscriber::fmt::layer()
-            .event_format(MyCustomFormat)
-            .with_writer(file)
-            .with_ansi(false);
-        // .without_time()
-        // .with_level(false)
-        // .with_target(false)
-        // .compact();
-
-        // Initialize with both layers and the filter
-        // let stdout_layer = tracing_subscriber::fmt::layer()
-        //     .event_format(MyCustomFormat);
-
-        tracing_subscriber::registry()
-            // .with(stdout_layer)
-            .with(file_layer)
-            .with(filter)
-            .init();
+        let path = format!("{}/{}", dir, file_name);
+        println!("Logging to {path}");
+        if asyn {
+            let file_appender = RollingFileAppender::new(
+                path,
+                RollingConditionBasic::new().max_size(100 * 1024 * 1024 * 1024),
+                1 // max files
+            ).unwrap();
+            // let file_appender = tracing_appender::rolling::hourly(dir, file_name);
+            let (nb, guard) = non_blocking(file_appender);
+            tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer()
+                    .event_format(MyCustomFormat)
+                    .with_ansi(false)
+                    .with_writer(nb))
+                .with(filter)
+                .init();
+            Some(guard)
+        } else {
+            let writer = File::create(&path).unwrap();
+            tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer()
+                    .event_format(MyCustomFormat)
+                    .with_ansi(false)
+                    .with_writer(writer))
+                .with(filter)
+                .init();
+            None
+        }
     } else {
         // Initialize with just the stdout layer and the filter
         // Create a stdout layer with ANSI colors and custom format (skipping first two fields)
@@ -87,5 +99,6 @@ pub fn init_logging(log_to_file: Option<String>) {
             .with(stdout_layer)
             .with(filter)
             .init();
+        None
     }
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use rayon::iter::ParallelIterator;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -75,6 +76,37 @@ pub fn create_rom_item(is_selected: bool, item: RomInfo) -> Element<'static, Mes
         .into()
 }
 
+
+pub fn display_roms_by_mapper(path: &str) {
+    let entries: Vec<_> = WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .collect();
+
+    let mut mapper_map: HashMap<u8, u16> = HashMap::new();
+
+    entries
+        // .into_par_iter()
+        .iter()
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.path().extension() == Some(std::ffi::OsStr::new("nes")))
+        .for_each(|e| {
+            let path = e.path().to_str().unwrap();
+            let n = mapper_number(path);
+            let count = mapper_map.get(&n).unwrap_or(&0);
+            mapper_map.insert(n, count + 1);
+        });
+
+    let mut list: Vec<(u8, u16)> = Vec::new();
+    mapper_map.iter().for_each(|e| {
+        list.push((*e.0, *e.1))
+    });
+    list.sort_by(|a, b| b.1.cmp(&a.1));
+    list.iter().for_each(|e| {
+        println!("Mapper {}: {} roms", e.0, e.1);
+    });
+}
+
 /// Return all the .nes files using the provided mappers
 pub fn find_roms_with_mappers(path: &str, mappers: Vec<u8>) -> Vec<RomInfo> {
     let entries: Vec<_> = WalkDir::new(path)
@@ -95,7 +127,8 @@ pub fn find_roms_with_mappers(path: &str, mappers: Vec<u8>) -> Vec<RomInfo> {
         id += 1;
     }
 
-    info!("Found {} ROMs", result.len());
+    info!("Found {} ROMs for mappers [{}]", result.len(),
+        mappers.iter().map(|m| format!("{}", m)).collect::<Vec<String>>().join(", "));
     result
 }
 

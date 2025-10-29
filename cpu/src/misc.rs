@@ -1,8 +1,4 @@
-use std::collections::HashSet;
-use crate::memory::{DefaultMemory, Memory};
-use crate::cpu::{Cpu, RunStatus };
-use std::sync::mpsc::{Sender};
-use crate::config::Config;
+use crate::cpu::RunStatus;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CpuMessage {
@@ -48,19 +44,19 @@ impl std::fmt::Display for CpuState {
 //     }
 // }
 
-pub(crate) fn _create_cpu<T: Memory>(pc: u16, m: T) -> Cpu<T> {
-    // let memory_listener = MListener::new();
-    // let boxed = Box::new(memory_listener);
-    // let m = DefaultMemory::new_with_file("6502_functional_test.bin");
-    let mut result = Cpu::new(m, None, Config::default());
-    result.pc = pc;
-    result
-}
-
-pub(crate) fn _run_emulator<T: Memory>(_: Sender<CpuMessage>, _debug_asm: bool) {
-    let m = DefaultMemory::new_with_file("6502_functional_test.bin");
-    _create_cpu(0x400, m).run(Config::default(), &HashSet::new());
-}
+// pub(crate) fn create_cpu<T: Memory>(pc: u16, m: T) -> Cpu<T> {
+//     // let memory_listener = MListener::new();
+//     // let boxed = Box::new(memory_listener);
+//     // let m = DefaultMemory::new_with_file("6502_functional_test.bin");
+//     let mut result = Cpu::new(m, None, Config::default());
+//     result.pc = pc;
+//     result
+// }
+//
+// pub(crate) fn run_emulator<T: Memory>(_: Sender<CpuMessage>, _debug_asm: bool) {
+//     let m = DefaultMemory::new_with_file("6502_functional_test.bin");
+//     create_cpu(0x400, m).run(Config::<NoExternalLogger>::default(), &HashSet::new());
+// }
 
 // pub fn _start_emulator() -> (Arc<RwLock<Vec<u8>>>, Receiver<CpuMessage>) {
 //     let mut m: Vec<u8> = Vec::new();

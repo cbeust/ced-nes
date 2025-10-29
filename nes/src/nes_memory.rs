@@ -10,7 +10,7 @@ use crate::mappers::mapper_base::VramType::Vram;
 
 pub const MEMORY_SIZE: usize = 65_536;
 
-use crate::ppu::{Ppu, SPRITE_OVERFLOW};
+use crate::ppu::{Ppu, BIT_SPRITE_OVERFLOW, BIT_VBL};
 use crate::ppu_ctrl::PpuCtrl;
 use crate::ppu_mask::PpuMask;
 use crate::rom::Mirroring;
@@ -29,15 +29,19 @@ pub struct NesMemory{
     pub mapper: MapperBase,
 }
 
-impl  NesMemory{
+impl NesMemory{
     pub fn new(mapper: MapperBase,
         joypad: Arc<RwLock<Joypad>>,
         ppu: Arc<RwLock<Ppu>>) -> Self
     {
         let mut memory = Vec::<u8>::new();
-        for _ in 0..MEMORY_SIZE {
+        for i in 0..MEMORY_SIZE {
             memory.push(0);
+            // if i < 0x4800 { memory.push(0); }
+            // else { memory.push((i / 256) as u8); }
         }
+        memory[0x2001] = 0x08;
+        memory[0x4010] = 0x40;
         Self {
             ir: IR::default(),
             init: true,
@@ -167,7 +171,8 @@ impl  NesMemory{
                 0x2002 => {
                     // w:                  <- 0
                     self.ir.w = false;
-                    self.clear_bit(0x2002, SPRITE_OVERFLOW);
+                    self.clear_bit(0x2002, BIT_SPRITE_OVERFLOW);
+                    self.clear_bit(0x2002, BIT_VBL);
                     // $2002: bits 0 through 4 are open bus
                     result = (result & 0b1110_0000) | (self.ppu.read().unwrap().get_open_bus() & 0x1f);
                 }
@@ -193,9 +198,9 @@ impl  NesMemory{
                         // If palette address, return the direct result and not the internal buffer
                         // but set the internal buffer to the 0x2700 address
                         let a2 = 0x3f00 + (a & 0x1f);
-                        let result = self.ppu.read().unwrap().get_vram(a2, &self.mapper);
+                        let result = self.ppu.read().unwrap().get_vram(a2, &mut self.mapper);
                         let ts = 0x2700 + (a & 0xff);
-                        self.internal_buffer = self.ppu.read().unwrap().get_vram(ts, &self.mapper);
+                        self.internal_buffer = self.ppu.read().unwrap().get_vram(ts, &mut self.mapper);
                         debug!(target: "vram", "Reading VRAM palette [{a:04X}/{a2:02X}]:{:02X} and \
                         set internal_buffer to {:02X}",
                             result, self.internal_buffer);
@@ -204,7 +209,7 @@ impl  NesMemory{
                         // Regular VRAM read, return the internal buffer then update the internal
                         // buffer to the actual VRAM value
                         let result = self.internal_buffer;
-                        self.internal_buffer = self.ppu.read().unwrap().get_vram(a, &self.mapper);
+                        self.internal_buffer = self.ppu.read().unwrap().get_vram(a, &mut self.mapper);
                         debug!(target: "vram","Reading VRAM [{a:04X}] Old internal_buffer:{:02X} \
                         new internal_buffer and value returned:{:02X}",
                             self.internal_buffer, result);
@@ -360,9 +365,11 @@ impl  NesMemory{
     }
 }
 
+const REGISTER_LOWER_BOUND: u16 = 0x4800;
+
 impl  Memory for NesMemory{
     fn get(&mut self, address: u16) -> u8 {
-        if address >= 0x8000 {
+        if address >= REGISTER_LOWER_BOUND {
             self.mapper.read_prg(address)
         } else {
             self.get2(address)
@@ -370,7 +377,7 @@ impl  Memory for NesMemory{
     }
 
     fn set(&mut self, address: u16, value: u8) {
-        if address >= 0x8000 {
+        if address >= REGISTER_LOWER_BOUND {
             // self.set_force(address, value);
             self.mapper.write_prg(address, value);
         } else {
@@ -379,7 +386,7 @@ impl  Memory for NesMemory{
     }
 
     fn set_force(&mut self, address: u16, value: u8) {
-        if address >= 0x8000 {
+        if address >= REGISTER_LOWER_BOUND {
             // self.set_force(address, value);
             self.mapper.write_prg(address, value);
         } else {
@@ -388,7 +395,7 @@ impl  Memory for NesMemory{
     }
 
     fn get_direct(&mut self, address: u16) -> u8 {
-        if address >= 0x8000 {
+        if address >= REGISTER_LOWER_BOUND {
             self.mapper.read_prg(address)
         } else {
             self.memory[address as usize]

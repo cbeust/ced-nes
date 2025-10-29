@@ -15,6 +15,7 @@ use iced::{
     widget::{button, column, container, row, scrollable, text, text_input},
     Alignment, Application, Settings
 };
+use iced::widget::scrollable::{Id, AbsoluteOffset};
 use iced_futures::backend::default::time::every;
 use iced_futures::core::SmolStr;
 use iced_futures::Subscription;
@@ -36,8 +37,9 @@ pub struct App {
     sender_to_emulator: Sender<ToEmulatorMessage>,
     joypad: Arc<RwLock<Joypad>>,
     roms: Vec<RomInfo>,
-    selected_rom_index: usize,
+    selected_rom_index: Option<usize>,
     filter_text: String,
+    scroll_id: Id,
 }
 
 pub struct SharedState {
@@ -61,7 +63,7 @@ impl Default for SharedState {
 impl App {
     pub fn new(args: Args,
         shared_state: Arc<RwLock<SharedState>>,
-        roms: Vec<RomInfo>, selected_rom_id: usize,
+        roms: Vec<RomInfo>, selected_rom_index: Option<usize>,
         sender_to_ui: Sender<ToUiMessage>,
         sender_to_emulator: Sender<ToEmulatorMessage>,
         joypad: Arc<RwLock<Joypad>>)
@@ -75,9 +77,29 @@ impl App {
             sender_to_ui,
             sender_to_emulator,
             roms,
-            selected_rom_index: selected_rom_id,
+            selected_rom_index,
             filter_text: String::new(),
+            scroll_id: Id::unique(),
         }
+    }
+
+    /// Calculate the height of a ROM item based on its actual components
+    fn calculate_rom_item_height(&self) -> f32 {
+        // Text height for size 12 font (approximate)
+        let text_height = 12.0;
+        
+        // Column spacing and padding from rom_list.rs
+        let column_spacing = 2.0;
+        let column_padding = 2.0 * 2.0; // top and bottom padding
+        
+        // Button border (can be 1.0 or 2.0, using average)
+        let button_border = 1.5;
+        
+        // List spacing between items (from rom_list function)
+        let list_spacing = 2.0;
+        
+        // Total height calculation
+        text_height + column_spacing + column_padding + button_border * 2.0 + list_spacing
     }
 
     pub fn subscription(&self) -> Subscription<AppMessage> {
@@ -244,25 +266,64 @@ impl App {
                 }
             }
             RomSelected(rom_id) => {
-                self.selected_rom_index = rom_id;
+                self.selected_rom_index = Some(rom_id);
                 info!("Selected ROM at index {}", rom_id);
+                
+                // Calculate scroll position to center the selected item
+                // let filtered_count = self.roms.iter()
+                //     .filter(|rom| {
+                //         if self.filter_text.is_empty() {
+                //             true
+                //         } else {
+                //             rom.name().to_lowercase().contains(&self.filter_text.to_lowercase())
+                //         }
+                //     })
+                //     .count();
+                
+                // let selected_position = self.roms.iter().enumerate()
+                //     .filter(|(_, rom)| {
+                //         if self.filter_text.is_empty() {
+                //             true
+                //         } else {
+                //             rom.name().to_lowercase().contains(&self.filter_text.to_lowercase())
+                //         }
+                //     })
+                //     .position(|(index, _)| index == rom_id);
+                //
+                // if let Some(pos) = selected_position {
+                //     // Calculate actual item height based on component dimensions
+                //     let item_height = self.calculate_rom_item_height();
+                //     let visible_height = 400.0; // Approximate visible height of the list
+                //     let center_offset = pos as f32 * item_height - (visible_height / 2.0) + (item_height / 2.0);
+                //     let scroll_offset = center_offset.max(0.0);
+                //     info!("Scrolling to position {} with calculated height {} and offset {}", pos, item_height, scroll_offset);
+                //
+                //     return scrollable::scroll_to(
+                //         self.scroll_id.clone(),
+                //         AbsoluteOffset { x: 0.0, y: scroll_offset }
+                //     );
+                // }
             }
             Reboot => {
                 // self.shared_state.write().unwrap().selected_rom_index = index;
                 // let _ = self.sender.send(
                 //     CpuMessage::Reboot(self.shared_state.write().unwrap().selected_rom_index));
                 info!("Requesting reboot");
-                let rom_info = self.roms[self.selected_rom_index].clone();
-                let _ = self.sender_to_emulator.send(ToEmulatorMessage::Reboot(rom_info));
+                if let Some(index) = self.selected_rom_index {
+                    let rom_info = self.roms[index].clone();
+                    let _ = self.sender_to_emulator.send(ToEmulatorMessage::Reboot(rom_info));
+                }
             }
             Debug => {
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::Debug);
             }
             RebootRandom => {
                 let random = rand::thread_rng().gen_range(0..self.roms.len());
-                self.selected_rom_index = random;
-                let rom_info = self.roms[random].clone();
-                let _ = self.sender_to_emulator.send(ToEmulatorMessage::Reboot(rom_info));
+                self.selected_rom_index = Some(random);
+                let index = (self.selected_rom_index.unwrap() + 1) % self.roms.len();
+                // self.selected_rom_index = Some(index);
+                info!("Selected ROM {}/{}", index, self.roms.len());
+                return self.update(RomSelected(index)).chain(self.update(Reboot));
             }
             FilterTextChanged(text) => {
                 self.filter_text = text;
@@ -309,15 +370,20 @@ impl App {
     // }
 
     fn rom_info_box(&self) -> Element<AppMessage> {
-        let current_rom = &self.roms[self.selected_rom_index];
-        let mapper_num_str = current_rom.mapper_number().to_string();
+        let (name, mapper_number) = if let Some(index) = self.selected_rom_index {
+            let current_rom = &self.roms[index];
+            let mapper_num_str = current_rom.mapper_number().to_string();
+            (current_rom.name(), mapper_num_str)
+        } else {
+            ("??".into(), "0".into())
+        };
         
         let info_content = row![
-            text(current_rom.name())
+            text(name)
                 .size(18)
                 .style(|_theme| text::Style { color: Some(Color::from_rgb(1.0, 1.0, 1.0)) })
                 .width(Length::Fill),
-            text(mapper_num_str)
+            text(mapper_number)
                 .size(12)
                 .style(|_theme| text::Style { color: Some(Color::from_rgb(1.0, 1.0, 0.0)) })
         ]
@@ -354,7 +420,11 @@ impl App {
                 column![].spacing(2),
                 |col, (index, it)| {
                     let item = it.clone();
-                    let is_selected = index == self.selected_rom_index;
+                    let is_selected = if let Some(si) = self.selected_rom_index {
+                        if si == index { true } else { false }
+                    } else {
+                        false
+                    };
                     col.push(create_rom_item(is_selected, item).map(move |message| {
                         match message {
                             crate::listview::Message::ItemClicked(_) => AppMessage::RomSelected(index),
@@ -366,6 +436,7 @@ impl App {
 
         container(
             scrollable(items_column)
+                .id(self.scroll_id.clone())
                 .width(Length::Fill)
                 .height(Length::Fill)
         )
@@ -489,18 +560,16 @@ pub fn launch_emulator(mut args: Args, mut rom_info: RomInfo,
                 shared_state.clone(), joypad2.clone(), args.clone());
             let mut one_second_start = Instant::now();
             let mut one_second_cycles = 0;
-            let mut frequency_start = Instant::now();
-            let mut frequency_cycles = 0;
 
             while ! reboot {
                 let cycles = emulator.tick();
                 one_second_cycles += cycles;
-                frequency_cycles += cycles;
 
                 // Refresh the frequency display every second
-                if one_second_start.elapsed().as_millis() > 1000 {
+                let elapsed = one_second_start.elapsed().as_millis();
+                if elapsed > 1000 {
                     let frames = emulator.frame_stats.len();
-                    let frequency = one_second_cycles as f32 / 1_000_000.0;
+                    let frequency = one_second_cycles as f32 / (elapsed as f32 * 1000.0);
                     let _ = sender.send(ToUiMessage::Update(frequency, frames as u16));
                     emulator.frame_stats.clear();
                     one_second_cycles = 0;
@@ -513,15 +582,20 @@ pub fn launch_emulator(mut args: Args, mut rom_info: RomInfo,
                     // The higher the divider, the smoother the scrolling, up to a point
                     // (if the divider is too high, it makes the emulator uncapped)
                     let divider = 30_u128;
-                    let frame_cap = cap as u128 / divider;
+                    // Divider = 10, caps = 40 fps, need to run 4 frames every 100ms
+                    let frame_cap_divided = cap as u128 / divider;
                     let time_wait_ms = 1000 / divider;
                     let frame_count = emulator.frame_count.len();
-                    if frame_count >= frame_cap as usize {
+                    // let frame_count_divided = frame_count / divider as usize;
+                    // info!("Frame count:{frame_count} time_wait:{time_wait_ms}");
+                    if frame_count as u128 >= frame_cap_divided {
                         let elapsed = emulator.frame_count_last.elapsed().as_millis();
+                        // info!("  elapsed: {elapsed}");
                         if elapsed < time_wait_ms {
                             let sleep_ms = time_wait_ms - elapsed;
+                            // info!("  sleeping {sleep_ms}");
                             thread::sleep(Duration::from_millis((sleep_ms) as u64));
-                            emulator.frame_count = Vec::new();
+                            emulator.frame_count.drain(0..frame_cap_divided as usize);
                             emulator.frame_count_last = Instant::now();
                         }
                     }

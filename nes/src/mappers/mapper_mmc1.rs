@@ -9,7 +9,7 @@ use crate::rom::{Mirroring, Rom, CHR_ROM_SIZE, PRG_ROM_SIZE};
 /// MMC1, mapper 1
 pub struct MapperMMC1 {
     prg_rom: Vec<u8>,
-    prg_rom_size: u8,
+    prg_rom_bank_count: u8,
     chr_rom: Vec<u8>,
 
     shift_reg: u8,
@@ -27,10 +27,10 @@ impl MapperMMC1 {
     pub fn new(rom: &Rom, config: &mut MapperConfig) -> Self {
         config.set_is_custom_prg(true);
         config.set_is_custom_chr(true);
-        let prg_rom_size = (rom.prg_rom.len() / PRG_ROM_SIZE) as u8;
+        let prg_rom_bank_count = (rom.prg_rom.len() / PRG_ROM_SIZE) as u8;
         Self {
             prg_rom: rom.prg_rom.clone(),
-            prg_rom_size,
+            prg_rom_bank_count,
             chr_rom: rom.chr_rom.clone(),
             shift_reg: 0,
             shift_count: 0,
@@ -54,6 +54,7 @@ impl MapperMMC1 {
 
 impl Mapper for MapperMMC1 {
     fn write_prg(&mut self, address: u16, value: u8, config: &mut MapperConfig) {
+        if address < 0x8000 { return; }
         // Ignore consecutive writes (e.g. INC)
         let cycles = *CYCLES.read().unwrap();
         if self.last_cycle_write == cycles {
@@ -114,6 +115,8 @@ impl Mapper for MapperMMC1 {
                     let nametable_arrangement = self.shift_reg & 0b11;
                     self.nametable_arrangement = nametable_arrangement;
                     match nametable_arrangement {
+                        0 => config.set_mirroring(Mirroring::ScreenA),
+                        1 => config.set_mirroring(Mirroring::ScreenB),
                         2 => config.set_mirroring(Mirroring::Vertical),
                         3 => config.set_mirroring(Mirroring::Horizontal),
                         // 0 | 1 is using 1KB of VRAM for all four screens, so mirroring 4 times in
@@ -151,28 +154,32 @@ impl Mapper for MapperMMC1 {
         self.chr_rom[a] = value;
     }
 
-    fn read_chr(&self, address: u16) -> u8 {
+    fn read_chr(&mut self, address: u16) -> u8 {
         self.chr_rom[self.chr_index(address)]
     }
 
     fn read_prg(&self, address: u16) -> u8 {
         let control = (self.control >> 2) & 0b11;
-        let bank = match control {
+        let mut bank = match control {
             0 | 1 => (self.prg_bank & 7) as usize,       // 32 KB mode
             2 => if address < 0xc000 { self.prg_bank as usize } else { 0 }, // switch at $8000
             3 => if address < 0xC000 {
                 (self.prg_bank & 0xf) as usize
                 } else {
-                    self.prg_rom_size as usize - 1
+                    self.prg_rom_bank_count as usize - 1
                 },
             _ => { panic!("Should never happen");}
         };
 
-        // debug!(target: "mapper", "M1: read_prg() {address:04X} control:{} prg_bank:{} bank:{}",
-        //     self.control, self.prg_bank, bank);
-
+        bank = bank & (self.prg_rom_bank_count as usize - 1);
         let actual_address = (bank * PRG_ROM_SIZE) + (address & 0x3fff) as usize;
-        // info!("Address for {address:04X} {actual_address:04X}");
+
+        // if actual_address >= self.prg_rom.len() {
+        //     debug!(target: "mapper", "M1: read_prg() {address:04X} control:{} prg_bank:{} bank:{}",
+        //         self.control, self.prg_bank, bank);
+        //     println!();
+        // }
+
         let result = self.prg_rom[actual_address];
         result
     }

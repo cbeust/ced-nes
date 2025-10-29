@@ -24,9 +24,10 @@ mod config_file;
 #[cfg(test)]
 mod test;
 mod mappers;
+mod mesen_logger;
 // mod test_rom;
 
-use crate::constants::{RomInfo, ALL_MAPPERS, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM, TRACE_FILE_NAME, USE_ICED};
+use crate::constants::{RomInfo, ALL_MAPPERS, LOG_ASYNC, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM, TRACE_FILE_NAME, USE_ICED};
 use crate::iced::main_iced;
 use crate::minifb::main_minifb;
 use std::process::exit;
@@ -40,6 +41,10 @@ use crate::rom_list::find_roms_with_mappers;
 #[derive(Default, Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
+    /// Path of the rom
+    #[arg(long)]
+    rom_name: Option<String>,
+
     /// Directory containing ROM files.
     #[arg(long)]
     rom_dir: Option<String>,
@@ -62,6 +67,7 @@ pub struct Args {
 impl Clone for Args {
     fn clone(&self) -> Self {
         Self {
+            rom_name: None,
             rom_dir: self.rom_dir.clone(),
             rom_names: self.rom_names.clone(),
             rom: None,
@@ -85,12 +91,16 @@ fn convert() {
 
 // #[tokio::main]
 pub fn main() {
-    init_logging(if LOG_TO_FILE { Some(TRACE_FILE_NAME.into()) } else { None });
+    let mut config = EmulatorConfig::read_or_create().unwrap();
+
+    let _guard = init_logging(
+        if LOG_TO_FILE { Some(TRACE_FILE_NAME.into()) } else { None },
+        LOG_ASYNC
+    );
 
     // Parse command-line arguments
     let mut args = Args::parse();
 
-    let mut config = EmulatorConfig::read_or_create().unwrap();
     if config.rom_dir.is_none() {
         if let Some(rom_dir) = &args.rom_dir {
             config.rom_dir = Some(rom_dir.clone());
@@ -120,30 +130,28 @@ pub fn main() {
     };
 
     // Log the parsed ROM IDs
-    let index2 =
-        if let Some(index) = &args.rom {
-            index
-        } else {
-            &SELECTED_ROM
-        };
-    let index = roms.iter().enumerate().find(|(index, rom)| rom.id == *index2)
-        .map_or(0, |(index, _)| index);
+    let rom_info = {
+        let index2 =
+            if let Some(index) = &args.rom {
+                index
+            } else {
+                &SELECTED_ROM
+            };
+        let index = roms.iter().enumerate().find(|(index, rom)| rom.id == *index2)
+            .map_or(0, |(index, _)| index);
         // .cloned().unwrap_or(ROM_NAMES[0].clone());
-    if args.rom_names.is_empty() {
-        args.rom_names.push(roms[index].file_name.clone());
-    }
+        if args.rom_names.is_empty() {
+            args.rom_names.push(roms[index].file_name.clone());
+        }
+        if let Some(name) = &args.rom_name {
+            RomInfo::n(0, name)
+        } else {
+            roms[index].clone()
+        }
+    };
 
-    // Test log messages with different levels
-    info!("INFO: Starting NES");
-    debug!("DEBUG: Starting NES");
-
-    // test_pattern();
-    // test_ppu();
-    // test_rom();
-
-    // exit(0);
     if USE_ICED {
-        main_iced(args, roms.clone(), index);
+        main_iced(args, roms.clone(), rom_info);
     } else {
         main_minifb(args)
     }

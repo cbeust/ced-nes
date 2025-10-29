@@ -15,5 +15,6 @@ pub mod messages;
 pub mod labels;
 #[macro_use]
 pub mod macros;
+pub mod external_logger;
 // mod test_json;
 

@@ -5,7 +5,7 @@ use crate::get_bit;
 use once_cell::sync::Lazy;
 use std::sync::RwLock;
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use crate::constants::*;
 use crate::mappers::mapper_base::{MapperBase, VramType};
 use crate::ppu_ctrl::PpuCtrl;
@@ -18,7 +18,7 @@ pub struct PpuResult {
     pub irq_requested: bool,
 }
 
-const VRAM_SIZE: usize = 0x4000;
+pub const VRAM_SIZE: usize = 0x4000;
 
 // 0x3f10 content at reset
 const DEFAULT_SPRITE_PALETTE: [u8;16] = [
@@ -41,11 +41,6 @@ pub struct Ppu {
     pub cycle: u16,
     pub rom: Rom,
     pub palette_table: [u8; 32],
-    /// Actually only holds the pattern table (0..0x2000) and the palette (0x3f00..0x3fff)
-    /// The nametables (0x2000..0x2fff) are held in vram_a and vram_b
-    vram: [u8; VRAM_SIZE],
-    vram_a: [u8; 0x400],
-    vram_b: [u8; 0x400],
     pub(crate) oam: [u8; 256],
     pub ppu_ctrl: PpuCtrl,
     sprite_0_hit: bool,
@@ -55,6 +50,12 @@ pub struct Ppu {
     open_bus: u8,
     // When was last time open_bus was written, used to simulate decay
     open_bus_last_cycle_written: u32,
+    // Incremented for every tick, used to calculate when the CPU ticks once
+    // (ppu_cycle % 3 == 0)
+    ppu_cycle: u64,
+    // Keep track of even/odd so we can skip a dot every other frame
+    // https://www.nesdev.org/wiki/PPU_frame_timing
+    odd_frame: bool,
 }
 
 impl Default for Ppu {
@@ -64,9 +65,6 @@ impl Default for Ppu {
             cycle: 28,
             rom: Rom::default(),
             palette_table: [0; 32],
-            vram: [0; VRAM_SIZE],
-            vram_a: [0; 0x400],
-            vram_b: [0; 0x400],
             oam: [0; 256],
             ppu_ctrl: PpuCtrl::default(),
             sprite_0_hit: false,
@@ -75,6 +73,8 @@ impl Default for Ppu {
             oam_address: 0,
             open_bus: 0,
             open_bus_last_cycle_written: 0,
+            ppu_cycle: 0,
+            odd_frame: false,
         }
     }
 }
@@ -83,7 +83,7 @@ pub const CYCLES : u16 = 341;
 pub const SCANLINES: u16 = 262;
 
 
-pub static CURRENT_CYCLE: Lazy<RwLock<u16>> = Lazy::new(|| RwLock::new(0));
+pub static CURRENT_CYCLE: Lazy<RwLock<u16>> = Lazy::new(|| RwLock::new(27));
 pub static CURRENT_SCANLINE: Lazy<RwLock<u16>> = Lazy::new(|| RwLock::new(0));
 
 impl Ppu {
@@ -118,42 +118,33 @@ impl Ppu {
         result
     }
 
-    pub fn get_vram(&self, address: usize, mapper: &MapperBase) -> u8 {
+    pub fn get_vram(&self, address: usize, mapper: &mut MapperBase) -> u8 {
         let after = NesMemory::ppu_mirrorring(address as u16) as usize;
-        let result = if after < 0x2000 {
-            mapper.read_chr(after as u16)
+        let result = if (0x2000..=0x2fff).contains(&after) {
+            mapper.read_nametable(after)
+        } else if address >= 0x3f00 {
+            self.palette_table[after & 0x1f]
         } else {
-            match mapper.nametable_mirroring(after) {
-                VramType::Vram_A => { self.vram_a[address & 0x3ff] }
-                VramType::Vram_B => { self.vram_b[address & 0x3ff] }
-                VramType::Vram => { self.vram[after] }
-            }
+            mapper.read_chr(after as u16)
         };
         result
     }
 
-    pub fn set_vram(&mut self, address: usize, mut value: u8, mapper: &mut MapperBase) {
+    pub fn set_vram(&mut self, address: usize, value: u8, mapper: &mut MapperBase) {
         let after = NesMemory::ppu_mirrorring(address as u16) as usize;
-        // let after = address as usize;
-        if after < 0x2000 {
-            mapper.write_chr(after as u16, value);
+        if (0x2000..=0x2fff).contains(&after) {
+            mapper.write_nametable(after, value);
+        } else if address >= 0x3f00 {
+            self.palette_table[after & 0x1f] = value & 0x3f;
         } else {
-            if after >= 0x3f00 && after <= 0x3fff {
-                // Only keep 6 bits for palette writes
-                value &= 0b0011_1111;
-            }
-            match mapper.nametable_mirroring(after) {
-                VramType::Vram_A => { self.vram_a[address & 0x3ff] = value }
-                VramType::Vram_B => { self.vram_b[address & 0x3ff] = value }
-                VramType::Vram => self.vram[after] = value
-            }
-        }
+            mapper.write_chr(after as u16, value);
+        };
     }
 
     /// Return 0, 1, 2, or 3
     /// If 0, that color is transparent
     fn get_color_index(&self, tile_index: usize, x: u16, y: u16, is_first_table: bool,
-            mapper: &MapperBase) -> u8 {
+            mapper: &mut MapperBase) -> u8 {
         let bytes_offset = if is_first_table { 0 } else { 0x1000 } + tile_index * 16;
         let y_in_tile = (y as usize) % 8;
         let plane0_byte = self.get_vram(bytes_offset + y_in_tile, mapper);      // Low bit plane
@@ -170,21 +161,43 @@ impl Ppu {
 
     /// Return (color_index, color, sprite_0_hit)
     fn background_color(&self, sprite_rendering: bool, background_rendering: bool,
-        memory: &NesMemory) -> (u8, bool)
+        memory: &mut NesMemory) -> (u8, bool)
     {
         let x = self.cycle;
 
         if x < 8 && memory.ppu_mask.clip_background {
-            return (self.get_vram(0x3f00, &memory.mapper), false);
+            return (self.get_vram(0x3f00, &mut memory.mapper), false);
         }
         let y = self.scanline;
         let mut result_hit = self.sprite_0_hit;
 
-        let tilemap_address = 0x2000 | (memory.ir.v & 0xfff) as usize;
-        let tile_index = self.get_vram(tilemap_address, &memory.mapper) as usize;
+        // Apply fine X scroll by potentially sampling from the next tile and the
+        // proper in-tile pixel based on IR.x (fine X)
+        let fine_x = memory.ir.fine_x();
+        let x_in_tile_base = x % 8;
+        let x_eff = x_in_tile_base + fine_x; // 0..15
+        let use_next_tile = x_eff >= 8;
+        let in_tile_x = x_eff % 8; // pixel within the selected tile (0..7)
+
+        // Select the effective tile by adding one tile to the right when needed,
+        // including nametable wrap when coarse X is 31
+        let v_current = memory.ir.v;
+        let v_effective = if use_next_tile {
+            if (v_current & 0x1F) == 31 {
+                // Wrap coarse X to 0 and toggle horizontal nametable
+                (v_current & !0x1F) ^ 0x0400
+            } else {
+                v_current + 1
+            }
+        } else {
+            v_current
+        } & 0x0FFF; // keep within nametable addressing bits
+
+        let tilemap_address = 0x2000 | v_effective as usize;
+        let tile_index = self.get_vram(tilemap_address, &mut memory.mapper) as usize;
         let is_first_table = memory.ppu_ctrl.background_table == 0;
-        let color_index = self.get_color_index(tile_index, x,
-            memory.ir.fine_y(), is_first_table, &memory.mapper);
+        let color_index = self.get_color_index(tile_index, in_tile_x,
+            memory.ir.fine_y(), is_first_table, &mut memory.mapper);
 
         // if /* *BREAKPOINT.read().unwrap() && */ x == 96 && y == 64 {
         //     info!("tilemap_address:{tilemap_address:04X} \
@@ -197,17 +210,18 @@ impl Ppu {
         let palette_address = if color_index == 0 {
             0
         } else {
-            let v = memory.ir.v;
+            // Use the effective v (potentially pointing to the next tile)
+            let v = v_effective;
             // Attribute byte covers 4x4 tiles (32x32 pixels)
             let attribute_address = 0x23c0
                 | v & 0x0c00
                 | (v >> 4) & 0x38
                 | (v >> 2) & 7;
-            let attribute_data = self.get_vram(attribute_address as usize, &memory.mapper);
+            let attribute_data = self.get_vram(attribute_address as usize, &mut memory.mapper);
 
             // Determine which 2x2 tile quadrant we're in
-            let tile_x = memory.ir.coarse_x();
-            let tile_y = memory.ir.coarse_y();
+            let tile_x = (v & 0x1F) as u16; // coarse X from effective v
+            let tile_y = ((v >> 5) & 0x1F) as u16; // coarse Y from effective v
             let quadrant_x = (tile_x % 4) / 2;  // 0 or 1
             let quadrant_y = (tile_y % 4) / 2;  // 0 or 1
             let quadrant = (quadrant_y * 2) + quadrant_x;
@@ -233,7 +247,7 @@ impl Ppu {
             //
             // }
         };
-        let result_color = self.get_vram(0x3f00 + palette_address, &memory.mapper);
+        let result_color = self.get_vram(0x3f00 + palette_address, &mut memory.mapper);
 
         //
         // Sprite 0 detection
@@ -243,7 +257,7 @@ impl Ppu {
         } else if x < 8 && (memory.ppu_mask.clip_background || memory.ppu_mask.clip_sprites) {
             // No hit when clipping
         } else if y > 0 {
-            let is_sprite_transparent = self.sprite_color_at_coordinates(0, x, y, &memory.mapper)
+            let is_sprite_transparent = self.sprite_color_at_coordinates(0, x, y, &mut memory.mapper)
                 .is_none();
             let is_background_transparent = color_index == 0;
             result_hit |= sprite_rendering && background_rendering
@@ -272,7 +286,7 @@ impl Ppu {
     }
 
     /// Return true if sprite overflow
-    fn draw_sprites_on_scanline(&mut self, y: u16, mapper: &MapperBase) -> bool {
+    fn draw_sprites_on_scanline(&mut self, y: u16, mapper: &mut MapperBase) -> bool {
         let mut sprite_index = 63;
         // Bit mask capturing which of the 64 sprites we've drawn to keep
         // track of how many we've drawn on this scanline. Once we exceed 8, return
@@ -361,27 +375,27 @@ impl Ppu {
         let x = self.cycle;
         let y = self.scanline;
         if sprite_overflow {
-            memory.set_bit(0x2002, SPRITE_OVERFLOW);
+            memory.set_bit(0x2002, BIT_SPRITE_OVERFLOW);
         }
         if y <= 239 {
             if y == 0 && x == 0 {
                 result.frame_start = true;
-                memory.clear_bit(0x2002, SPRITE_OVERFLOW);
+                memory.clear_bit(0x2002, BIT_SPRITE_OVERFLOW);
             } else if x < 256 {
                 // Sprite 0 hit
                 if self.sprite_0_hit {
                     debug!(target:"vbl", "SPRITE_0:on");
-                    memory.set_bit(0x2002, SPRITE_0_HIT);
+                    memory.set_bit(0x2002, BIT_SPRITE_0_HIT);
                 }
             } else {
                 // 256..321,  HBLANK
                 self.oam_address = 0;
             }
         } else if y == 240 {
-            if x == 339 {
+            if x == 332 {
                 // VBL on
                 debug!(target: "vbl", "VBL:on");
-                memory.set_bit(0x2002, VBL);
+                memory.set_bit(0x2002, BIT_VBL);
                 // let v = memory.get(0x2002) | 0b1000_000;
                 // memory.set(0x2002, v);
                 result.vbl = true;
@@ -399,9 +413,9 @@ impl Ppu {
             if x == 1 && y == 261 {
                 // Clear VBL
                 debug!(target: "vbl", "VBL:off SPRITE_0:off");
-                memory.clear_bit(0x2002, VBL);
+                memory.clear_bit(0x2002, BIT_VBL);
                 // Clear sprite 0 hit
-                memory.clear_bit(0x2002, SPRITE_0_HIT);
+                memory.clear_bit(0x2002, BIT_SPRITE_0_HIT);
             }
         }
 
@@ -409,11 +423,15 @@ impl Ppu {
     }
 
     /// Draw the background
-    fn draw_background(&mut self, memory: &NesMemory, index: usize, sprite_rendering: bool,
+    fn draw_background(&mut self, memory: &mut NesMemory, index: usize, sprite_rendering: bool,
             background_rendering: bool)
     {
         let (background_color, hit) =
             self.background_color(sprite_rendering, background_rendering, memory);
+        if background_color >= 64 {
+            error!("Invalid background color: {background_color}");
+            panic!();
+        }
         self.screen[index] = background_color;
         self.sprite_0_hit |= hit;
     }
@@ -432,13 +450,19 @@ impl Ppu {
         *CURRENT_CYCLE.write().unwrap() = self.cycle;
         *CURRENT_SCANLINE.write().unwrap() = self.scanline;
 
+        // Notify the mapper for each CPU cycle
+        if (self.ppu_cycle % 3) == 0 {
+            irq_requested = memory.mapper.on_cpu_cycle();
+        }
+
+        self.ppu_cycle += 1;
         if y < 240 {
             if x < 256 {
                 self.draw_background(memory, index, sprite_rendering, background_rendering);
             }
             if x == 256 {
                 if sprite_rendering {
-                    sprite_overflow = self.draw_sprites_on_scanline(y, &memory.mapper);
+                    sprite_overflow = self.draw_sprites_on_scanline(y, &mut memory.mapper);
                 }
             }
             // TODO: this should be more nuanced: https://www.nesdev.org/wiki/MMC3
@@ -472,7 +496,9 @@ impl Ppu {
     fn update_beam(&mut self) {
         // Increment cycle/scanline
         self.cycle += 1;
-        if self.cycle == CYCLES {
+        let max = CYCLES; // if self.odd_frame { CYCLES - 1 } else { CYCLES };
+        if self.cycle == max {
+            self.odd_frame = ! self.odd_frame;
             self.cycle = 0;
             self.scanline += 1;
             if self.scanline == SCANLINES {
@@ -482,7 +508,7 @@ impl Ppu {
         }
     }
     fn calculate_palette_index_tile_offset(&self, x: u16, y: u16, tile_offset: usize,
-        mapper: &MapperBase) -> usize
+        mapper: &mut MapperBase) -> usize
     {
         // Get the bytes for this row
         let y_in_tile = y % 8;
@@ -501,7 +527,7 @@ impl Ppu {
     /// Return Some(sprite_color, behind_bg) or None if the sprite is missed or transparent
     /// x and y are screen coordinates
     fn sprite_color_at_coordinates(&self, sprite_index: usize, x: u16, y: u16,
-        mapper: &MapperBase)
+        mapper: &mut MapperBase)
     -> Option<(u8, bool)> {
         let i = sprite_index * 4;
         let sprite_x = self.oam[i + 3] as u16;
@@ -588,6 +614,6 @@ impl Ppu {
     // }
 }
 
-pub const SPRITE_OVERFLOW: u8 = 5;
-pub const SPRITE_0_HIT: u8 = 6;
-pub const VBL: u8 = 7;
+pub const BIT_SPRITE_OVERFLOW: u8 = 5;
+pub const BIT_SPRITE_0_HIT: u8 = 6;
+pub const BIT_VBL: u8 = 7;

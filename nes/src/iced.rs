@@ -4,13 +4,13 @@ use ::iced::{application, settings, window, Task, Size};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
 use crate::constants::*;
 
-pub fn main_iced(args: Args, roms: Vec<RomInfo>, selected_rom_id: usize) {
+pub fn main_iced(args: Args, roms: Vec<RomInfo>, rom_info: RomInfo) {
     let (sender_to_ui, _receiver_from_ui) = channel(10);
     let (sender_to_emulator, receiver_from_emulator) = channel(10);
-    let rom_info = roms[selected_rom_id].clone();
-    let (shared_state2, joypad) = launch_emulator(args.clone(), rom_info,
+    let (shared_state2, joypad) = launch_emulator(args.clone(), rom_info.clone(),
         sender_to_ui.clone(), receiver_from_emulator);
 
+    let selected_rom_id = roms.iter().position(|rom| rom.id == rom_info.id);
     let app = app::App::new(args, shared_state2, roms, selected_rom_id, sender_to_ui,
         sender_to_emulator, joypad);
     let window_settings = window::settings::Settings {

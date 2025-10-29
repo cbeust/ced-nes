@@ -1,3 +1,5 @@
+use crate::labels::Labels;
+
 #[derive(PartialEq, Debug, Copy, Clone)]
 
 #[allow(non_camel_case_types)]
@@ -10,7 +12,7 @@ fn h(v: u8, labels: &Labels) -> String {
     if let Some(label) = labels.get(&(v as u16)) {
         label.into()
     } else {
-        format!("${:02X}", v)
+        format!("${v:02X}")
     }
 }
 
@@ -18,7 +20,7 @@ fn hh(v: u16, labels: &Labels) -> String {
     if let Some(label) = labels.get(&(v)) {
         label.into()
     } else {
-        format!("${:04X}", v)
+        format!("${v:04X}")
     }
 }
 
@@ -26,7 +28,6 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Result};
 use crate::addressing_type::AddressingType::{Absolute_X, Absolute_Y};
 use crate::cpu::Cpu;
-use crate::labels::Labels;
 use crate::memory::{DefaultMemory, Memory};
 
 impl Display for AddressingType {

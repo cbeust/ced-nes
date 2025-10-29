@@ -1,4 +1,4 @@
-pub const CAP_FPS: Option<u16> = Some(600);
+pub const CAP_FPS: Option<u16> = Some(1200);
 
 pub const DONKEY_KONG: &str = "Donkey_Kong.nes";
 pub const PACMAN: &str = "PacMan2.nes";
@@ -6,16 +6,18 @@ pub const TRACE_FILE_NAME: &str = "trace.txt";
 
 const DEBUG: bool = false;
 pub const DEBUG_ASM: bool = DEBUG;
+pub const DEBUG_MESEN: bool = false;
 pub const LOG_TO_FILE: bool = DEBUG;
+pub const LOG_ASYNC: bool = true;
 pub const USE_ICED: bool = true;
-pub const SELECTED_ROM: usize = 110;
+pub const SELECTED_ROM: usize = 1900;
 
 // Logging
 pub const IR: bool = false;
 pub const VRAM: bool = false;
 pub const ROM: bool = false;
 pub const MAPPER: bool = false;
-pub const VBL: bool = DEBUG;
+pub const VBL: bool = false;
 
 // Screen
 pub const WIDTH: usize = 256;
@@ -23,9 +25,9 @@ pub const HEIGHT: usize = 240;
 pub const SCALE_X: f32 = 2.0;
 pub const SCALE_Y: f32 = 2.0;
 
-// pub const ALL_MAPPERS: [u8; 1] = [3];
-pub const ALL_MAPPERS: [u8; 6] = [0, 1, 2, 3, 4, 7];
-pub const DEMO_DELAY_SECONDS: u64 = 6;
+// pub const ALL_MAPPERS: [u8; 1] = [9];
+pub const ALL_MAPPERS: [u8; 9] = [0, 1, 2, 3, 4, 7, 9, 19, 66];
+pub const DEMO_DELAY_SECONDS: u64 = 2;
 
 use std::convert::Into;
 use once_cell::sync::Lazy;
@@ -111,7 +113,7 @@ pub static ROM_NAMES: Lazy<Vec<RomInfo>> = Lazy::new(|| {
         RomInfo::n2(17, "test-rom/test-rom.nes", "Test ROM"),
 
         // Mqpper 1
-        RomInfo::n2(100, "zelda.nes", "Zelda"),
+        RomInfo::n2(100, "Legend of Zelda, The (U) (V1.0) [!].nes", "Zelda"),
         RomInfo::n2(101, "Lemmings (E) [!].nes", "Lemmings"),
         RomInfo::n2(102, "Chessmaster, The (U) (V1.0) [!].nes", "Chessmaster"),
         RomInfo::n2(103, "Wizardry - Proving Grounds of the Mad Overlord (U) [!].nes", "Wizardry"),
@@ -123,6 +125,8 @@ pub static ROM_NAMES: Lazy<Vec<RomInfo>> = Lazy::new(|| {
         // Crash
         RomInfo::n2(109, "Genghis Khan (U) [!].nes", "Genghis Khan"),
         RomInfo::n2(110, "Defender of the Crown (U) [!].nes", "Defender of the Crown"),
+        RomInfo::n2(111, "Tetris.nes", "Tetris"),
+        RomInfo::n2(112, "Snow Brothers (USA).nes", "Snow Brothers"),
 
         // Mapper 2
         RomInfo::n2(200, "Castlevania (U) (V1.0) [!].nes", "Castlevania"),
@@ -146,6 +150,14 @@ pub static ROM_NAMES: Lazy<Vec<RomInfo>> = Lazy::new(|| {
 
         // Mapper 7
         RomInfo::n2(700, "Battletoads (U) [!].nes", "Battletoads"),
+
+        // Mapper 9
+        RomInfo::n2(900, "Mike Tyson's Punch-Out!! (E) (V1.0) [!].nes", "Mike Tyson's Punch-Out"),
+
+        // Mapper 19
+        RomInfo::n2(1900, "championship.nes", "PacMan Championship Edition"),
+        RomInfo::n2(1901, "Battle Fleet (J) [!].nes", "Battle Fleet"),
+        RomInfo::n2(1902, "Digital Devil Story - Megami Tensei II (J) (V1.0) [!].nes", "Digital Devil Story"),
 
         // Tests
         RomInfo::n(551, "01.basics.nes"),

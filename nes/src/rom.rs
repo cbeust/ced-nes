@@ -18,8 +18,11 @@ pub struct Header {
     // Byte trainer at $7000-$71FF
     byte_trainer: bool,
     four_screen_mirroring: bool,
-    mapper_number: u8,
+    mapper_number: u16,
+    submapper_number: u16,
     pub(crate) mirroring: Mirroring,
+    chr_ram_size: usize,
+    chr_nvram_size: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -41,7 +44,9 @@ pub struct Rom {
     pub header: Header,
     pub prg_rom: Vec<u8>, // Size PRG_ROM_SIZE
     pub chr_rom: Vec<u8>, // Size CHR_ROM_SIZE
-    pub mapper: u8,
+    prg_ram: Vec<u8>,
+    pub mapper: u16,
+    pub submapper: u16,
 }
 
 impl Default for Rom {
@@ -50,7 +55,9 @@ impl Default for Rom {
             header: Header::default(),
             prg_rom: vec![0; 0x8000], // Size PRG_ROM_SIZE
             chr_rom: vec![0; 0x2000], // Size CHR_ROM_SIZE
+            prg_ram: Vec::new(),
             mapper: 0,
+            submapper: 0,
         }
     }
 }
@@ -66,7 +73,8 @@ impl Rom {
     }
 
     pub fn read_nes_file(file_name: &str) -> Result<Rom, ()> {
-        let mut file = Self::find_rom(file_name).expect(&format!("File {file_name} should exist"));
+        let mut file = Self::find_rom(file_name)
+            .expect(&format!("File {file_name} should exist"));
         let mut buffer: Vec<u8> = Vec::new();
         file.read_to_end(&mut buffer).unwrap();
 
@@ -74,9 +82,11 @@ impl Rom {
         // Read header (0..0x10)
         //
         assert!(buffer[0] == b'N' && buffer[1] == b'E' && buffer[2] == b'S' && buffer[3] == 0x1a);
-        let byte6 = buffer[6];
-        let byte7 = buffer[7];
-        let mapper_number = (byte6 & 0xf0) >> 4 | (byte7 & 0xf0);
+        let byte6 = buffer[6] as u16;
+        let byte7 = buffer[7] as u16;
+        let byte8 = buffer[8] as u16;
+        let mapper_number = (byte6 & 0xf0) >> 4 | (byte7 & 0xf0) | (byte8 & 0xf) << 8;
+        let submapper_number = (byte8 & 0xf0) >> 4;
         let vertical_mirroring = is_set!(byte6, 0);
         let four_screen = is_set!(byte6, 3);
         let mirroring = match (four_screen, vertical_mirroring) {
@@ -86,23 +96,26 @@ impl Rom {
         };
 
         let header = Header {
-            prg_rom_count: buffer[4] as usize,
-            chr_rom_count: buffer[5] as usize,
+            prg_rom_count: buffer[4] as usize | ((buffer[9] as usize & 0xf) << 4),
+            chr_rom_count: buffer[5] as usize | (buffer[9] as usize & 0xf0),
             battery_backed_ram: is_set!(byte6, 1),
             byte_trainer: is_set!(byte6, 2),
             four_screen_mirroring: is_set!(byte6, 3),
+            chr_ram_size: buffer[11] as usize & 0xf,
+            chr_nvram_size: (buffer[11] as usize & 0xf0) >> 4,
             mapper_number,
+            submapper_number,
             mirroring,
         };
 
-        let prg_size = header.prg_rom_count as usize * PRG_ROM_SIZE;
-        let chr_size = header.chr_rom_count as usize * CHR_ROM_SIZE;
-        info!("Read {}, size:${:X} prg_size:${:X} chr_size:${:X} mapper:{}",
+        let prg_size = header.prg_rom_count * PRG_ROM_SIZE;
+        let chr_size = header.chr_rom_count * CHR_ROM_SIZE;
+        debug!(target: "rom", "Read {}, size:${:X} prg_size:${:X} ({}K) chr_size:${:X} ({}K) mapper:{}",
             file_name, buffer.len(),
-            prg_size,
-            header.chr_rom_count as usize * CHR_ROM_SIZE,
+            prg_size, prg_size / 1024,
+            chr_size, chr_size / 1024,
             mapper_number);
-        info!("Header: {header:#?}");
+        debug!(target: "rom", "Header: {header:#?}");
 
         //
         // Extract PRG ROM data
@@ -129,23 +142,25 @@ impl Rom {
             }
         }
 
-        debug!(target: "rom", "File offsets");
-        for i in 0..header.prg_rom_count {
-            let i = i as usize;
-            debug!(target: "rom", "PRG Bank {i}: {:05X}-{:05X}",
-                0x10 + i * PRG_ROM_SIZE, 0x10 + (i + 1) * PRG_ROM_SIZE - 1);
-        }
-        for i in 0..header.chr_rom_count * 2 {
-            let i = i as usize;
-            debug!(target: "rom", "CHR Bank {i}: {:05X}-{:05X}",
-                chr_rom_offset + i * 0x1000, chr_rom_offset + (i + 1) * 0x1000 - 1);
-        }
+        // debug!(target: "rom", "File offsets");
+        // for i in 0..header.prg_rom_count {
+        //     let i = i as usize;
+        //     debug!(target: "rom", "PRG Bank {i}: {:05X}-{:05X}",
+        //         0x10 + i * PRG_ROM_SIZE, 0x10 + (i + 1) * PRG_ROM_SIZE - 1);
+        // }
+        // for i in 0..header.chr_rom_count * 2 {
+        //     let i = i as usize;
+        //     debug!(target: "rom", "CHR Bank {i}: {:05X}-{:05X}",
+        //         chr_rom_offset + i * 0x1000, chr_rom_offset + (i + 1) * 0x1000 - 1);
+        // }
 
         let rom = Rom {
             header,
             chr_rom,
             prg_rom,
+            prg_ram: Vec::new(),
             mapper: mapper_number,
+            submapper: submapper_number,
         };
 
         Ok(rom)

@@ -1,6 +1,7 @@
 #![allow(unused)]
 #![allow(warnings)]
 
+use crate::external_logger::DefaultLogger;
 use std::fmt;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -26,7 +27,7 @@ use std::convert::TryInto;
 use std::fmt::{Display, Formatter};
 use std::ops::ControlFlow::Break;
 use std::process::exit;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use once_cell::sync::Lazy;
 use tokio::sync::broadcast::Sender;
@@ -36,11 +37,12 @@ use crate::config::{Config, System};
 use crate::constants;
 use crate::cpu::StopReason::BreakpointHit;
 use crate::disassembly::{Disassemble, RunDisassemblyLine};
+use crate::external_logger::{IExternalLogger};
 use crate::messages::{LogMsg, ToLogging};
 use crate::messages::ToLogging::Log;
 use crate::operand::{Operand};
 use crate::labels::Labels;
-
+use crate::log_file::LogFile;
 // fn init() -> [Operand; 256] {
 //     let mut result: Vec<Operand> = Vec::new();
 //     for i in 0..=255 {
@@ -165,6 +167,7 @@ pub struct Cpu<T: Memory> {
     pending_interrupt: Option<(u16, u16)>,
 
     logging_sender: Option<Sender<ToLogging>>,
+    log_file: LogFile,
 }
 
 impl<T: Memory> Display for Cpu<T> {
@@ -199,8 +202,7 @@ impl Default for RunStatus {
 
 impl Display for RunStatus {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(if matches!(self, RunStatus::Continue(_)) { "Running" } else { "Stopped" })
-            .unwrap();
+        f.write_str(if matches!(self, RunStatus::Continue(_)) { "Running" } else { "Stopped" })?;
         Ok(())
     }
 }
@@ -216,7 +218,14 @@ impl RunStatus {
 }
 
 impl <T: Memory> Cpu<T> {
-    pub fn new(mut memory: T, logging_sender: Option<Sender<ToLogging>>, config: Config) -> Cpu<T> {
+    pub fn new(mut memory: T,
+        logging_sender: Option<Sender<ToLogging>>,
+        config: &Config,
+        logger: Option<Box<dyn IExternalLogger>>) -> Cpu<T>
+    {
+        let operands = if config.is_65c02 { OPERANDS_65C02 } else { OPERANDS_6502 };
+        let log_file = LogFile::new(&config.trace_file_asm, Arc::new(RwLock::new(logger)), true, &config.labels,
+            operands.clone());
         Cpu {
             memory,
             a: 0,
@@ -239,13 +248,16 @@ impl <T: Memory> Cpu<T> {
             start: Instant::now(),
             started: false,
             is_65c02: config.is_65c02,
-            operands: if config.is_65c02 { OPERANDS_65C02 } else { OPERANDS_6502 },
+            operands,
             logging_sender,
             pending_interrupt: None,
+            log_file,
         }
     }
 
-    pub fn one_cycle(&mut self, config: &Config, breakpoints: &HashSet<u16>) -> bool {
+    pub fn one_cycle(&mut self, config: &mut Config,
+        breakpoints: &HashSet<u16>) -> bool
+    {
         if self.wait_cycles == -1 || self.wait_cycles == 0 {
             let previous_pc = self.pc;
             let opcode = self.memory.get(self.pc);
@@ -274,7 +286,9 @@ impl <T: Memory> Cpu<T> {
         }
     }
 
-    pub fn step(&mut self, config: &Config, breakpoints: &HashSet<u16>) {
+    pub fn step(&mut self, config: &mut Config,
+        breakpoints: &HashSet<u16>)
+    {
         if breakpoints.contains(&self.pc) {
             self.run_status = RunStatus::Stop(BreakpointHit, 1);
             return;
@@ -290,9 +304,10 @@ impl <T: Memory> Cpu<T> {
         self.cycles = self.cycles + self.run_status.cycles();
     }
 
-    pub fn run(&mut self, config: Config, breakpoints: &HashSet<u16>) {
+    pub fn run(&mut self, mut config: Config, breakpoints: &HashSet<u16>)
+    {
         while matches!(self.run_status, RunStatus::Continue(_)) {
-            self.step(&config, breakpoints)
+            self.step(&mut config, breakpoints)
         }
     }
 
@@ -346,7 +361,9 @@ impl <T: Memory> Cpu<T> {
         result
     }
 
-    pub fn next_instruction(&mut self, mut pc: u16, config: &Config, breakpoints: &HashSet<u16>) {
+    pub fn next_instruction(&mut self, mut pc: u16, config: &mut Config,
+        breakpoints: &HashSet<u16>)
+    {
         let max = 10;
         let mut i = 0;
 
@@ -372,6 +389,7 @@ impl <T: Memory> Cpu<T> {
         let mut resolved_address: Option<u16> = None;
         let mut resolved_value: Option<u8> = None;
         let mut resolved_read = true;
+        let mut resolved_before_memory: Option<u8> = None;
 
         // Save the registers for logging
         let a = self.a;
@@ -558,6 +576,9 @@ impl <T: Memory> Cpu<T> {
                 if (opcode == LDA_ZPI_65C02) && ! self.is_65c02 {}
                 else {
                     let (address, value) = self.address_value(pc, addressing_type);
+                    if opcode == LDA_ABS {
+                        resolved_before_memory = Some(self.memory.get_direct(address));
+                    }
                     resolved_address = Some(address);
                     resolved_value = Some(value);
                     self.a = value;
@@ -696,6 +717,9 @@ impl <T: Memory> Cpu<T> {
             STA_ZP | STA_ZP_X | STA_ABS | STA_ABS_X | STA_ABS_Y | STA_IND_X | STA_IND_Y | STA_ZPI_65C02 => {
                 if opcode == STA_ZPI_65C02 && ! self.is_65c02 {} else {
                     let address = addressing_type.address(pc, self);
+                    if opcode == STA_ABS || opcode == STA_ABS_X {
+                        resolved_before_memory = Some(self.memory.get_direct(address));
+                    }
                     // let (address, value) = self.address_value(pc, addressing_type);
                     resolved_address = Some(address);
                     // resolved_value = Some(value);
@@ -828,46 +852,14 @@ impl <T: Memory> Cpu<T> {
         // Final value for debug
         debug |= (config.debug_asm && is_below_max_pc);
 
-        ///
-        /// Tracing the asm log
-        ///
         if debug {
-        // if self.asm_always || self.trace_in_progress || self.trace_cycles_in_progress ||
-        //     (pc < 0xf000 && config.debug_asm && count_line_ok
-        //     && ! self.end_pc_reached && self.in_range)
-        // { // && self.pc < 0xf000 {
-            if self.debug_line_count > 0 {
-                self.debug_line_count -= 1;
-            }
-            
-            if config.asynchronous_logging {
-                if let Some(sender) = &self.logging_sender {
-                    let byte1 = self.memory.get(pc.wrapping_add(1));
-                    let byte2 = self.memory.get(pc.wrapping_add(2));
-                    sender.send(Log(LogMsg::new(self.cycles, pc, operand.clone(), byte1, byte2,
-                        resolved_address, resolved_value, resolved_read,
-                        a, x, y, p, s)));
-                }
-            } else {
-                let disassembly_line = Disassemble::disassemble2(&self.operands, pc,
-                    &operand, self.memory.get(pc.wrapping_add(1)),
-                    self.memory.get(pc.wrapping_add(2)),
-                    &config.labels
-                );
-                let d = RunDisassemblyLine::new(self.cycles, disassembly_line,
-                    resolved_address, resolved_value, resolved_read, cycles,
-                    a, x, y, p, s);
-                // let stack = self.format_stack();
-                // println!("{} {} {}", d.to_asm(), self.p, stack);
-                // println!("{}", d.to_csv());
-                if config.csv {
-                    info!("{}", d.to_csv());
-                } else {
-                    for log in d.to_log(&config.labels) {
-                        event!(target: "asm", Level::INFO, "{}", log);
-                    }
-                }
-            }
+            let byte1 = self.memory.get(pc.wrapping_add(1));
+            let byte2 = self.memory.get(pc.wrapping_add(2));
+            let log_msg = LogMsg::new(self.cycles, pc, operand.clone(),
+                byte1, byte2, resolved_before_memory,
+                resolved_address, resolved_value, resolved_read,
+                a, x, y, p, s);
+            self.log_file.log(log_msg);
         }
 
         self.run_status = RunStatus::Continue(cycles)
@@ -1208,7 +1200,7 @@ impl <T: Memory> Cpu<T> {
         self.p.set_c(v & 0x80 != 0);
         let result: u8 = v << 1;
         self.p.set_nz_flags(result);
-        return result;
+        result
     }
 
     fn adc(&mut self, address: u16) {
