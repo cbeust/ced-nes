@@ -19,6 +19,7 @@ pub mod internal_registers;
 mod ppu_mask;
 mod ppu_ctrl;
 mod config_file;
+mod apu;
 // mod v2;
 
 #[cfg(test)]
@@ -27,12 +28,14 @@ mod mappers;
 mod mesen_logger;
 // mod test_rom;
 
-use crate::constants::{RomInfo, ALL_MAPPERS, LOG_ASYNC, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM, TRACE_FILE_NAME, USE_ICED};
+use std::env::home_dir;
+use crate::constants::{RomInfo, ALL_MAPPERS, COMPARE_LOGS, CPU_TYPE_NEW, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM, TRACE_FILE_NAME, USE_ICED};
 use crate::iced::main_iced;
 use crate::minifb::main_minifb;
 use std::process::exit;
 use tracing::{debug, error, info, span, Level, Subscriber};
 use clap::Parser;
+use cpu::compare_logs::compare_log;
 use crate::color::{PALETTE_TUPLES, PALETTE_U32};
 use crate::config_file::EmulatorConfig;
 use crate::logging::init_logging;
@@ -90,13 +93,19 @@ fn convert() {
 }
 
 // #[tokio::main]
-pub fn main() {
-    let mut config = EmulatorConfig::read_or_create().unwrap();
+pub fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // apu.rs::play();
+    // exit(0);
 
+    let filename = if CPU_TYPE_NEW { "trace-new-cpu.txt" } else { TRACE_FILE_NAME };
     let _guard = init_logging(
-        if LOG_TO_FILE { Some(TRACE_FILE_NAME.into()) } else { None },
-        LOG_ASYNC
+        if LOG_TO_FILE { Some(filename.into() ) } else { None },
+        cpu::cpu::LOG_ASYNC
     );
+
+    debug!("Trying to open config file: {}", EmulatorConfig::config_file_name());
+
+    let mut config = EmulatorConfig::read_or_create().unwrap();
 
     // Parse command-line arguments
     let mut args = Args::parse();
@@ -104,8 +113,9 @@ pub fn main() {
     if config.rom_dir.is_none() {
         if let Some(rom_dir) = &args.rom_dir {
             config.rom_dir = Some(rom_dir.clone());
+            config.save()?;
         } else {
-            error!("Specify the rom directory with --rom-dir");
+            return Err("Specify the rom directory with --rom-dir".into());
         }
     }
 
@@ -153,6 +163,8 @@ pub fn main() {
     if USE_ICED {
         main_iced(args, roms.clone(), rom_info);
     } else {
-        main_minifb(args)
+        main_minifb(args);
     }
+
+    Ok(())
 }

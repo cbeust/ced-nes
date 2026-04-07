@@ -1,9 +1,7 @@
 use std::cmp::min;
 use std::fs::File;
-use tracing::{debug, info, warn};
+use tracing::{debug};
 use std::io::Read;
-use std::process::exit;
-use crate::emulator::Emulator;
 use crate::is_set;
 use crate::pattern::Pattern;
 
@@ -16,7 +14,7 @@ pub struct Header {
     // Memory backed ram at $6000-$7FFF
     battery_backed_ram: bool,
     // Byte trainer at $7000-$71FF
-    byte_trainer: bool,
+    // byte_trainer: bool,
     four_screen_mirroring: bool,
     mapper_number: u16,
     submapper_number: u16,
@@ -44,7 +42,7 @@ pub struct Rom {
     pub header: Header,
     pub prg_rom: Vec<u8>, // Size PRG_ROM_SIZE
     pub chr_rom: Vec<u8>, // Size CHR_ROM_SIZE
-    prg_ram: Vec<u8>,
+    // prg_ram: Vec<u8>,
     pub mapper: u16,
     pub submapper: u16,
 }
@@ -55,7 +53,7 @@ impl Default for Rom {
             header: Header::default(),
             prg_rom: vec![0; 0x8000], // Size PRG_ROM_SIZE
             chr_rom: vec![0; 0x2000], // Size CHR_ROM_SIZE
-            prg_ram: Vec::new(),
+            // prg_ram: Vec::new(),
             mapper: 0,
             submapper: 0,
         }
@@ -99,7 +97,7 @@ impl Rom {
             prg_rom_count: buffer[4] as usize | ((buffer[9] as usize & 0xf) << 4),
             chr_rom_count: buffer[5] as usize | (buffer[9] as usize & 0xf0),
             battery_backed_ram: is_set!(byte6, 1),
-            byte_trainer: is_set!(byte6, 2),
+            // byte_trainer: is_set!(byte6, 2),
             four_screen_mirroring: is_set!(byte6, 3),
             chr_ram_size: buffer[11] as usize & 0xf,
             chr_nvram_size: (buffer[11] as usize & 0xf0) >> 4,
@@ -158,7 +156,7 @@ impl Rom {
             header,
             chr_rom,
             prg_rom,
-            prg_ram: Vec::new(),
+            // prg_ram: Vec::new(),
             mapper: mapper_number,
             submapper: submapper_number,
         };
@@ -167,7 +165,7 @@ impl Rom {
     }
 }
 
-fn display_character(table: &[u8]) {
+fn _display_character(table: &[u8]) {
     for i in 0..8 {
         for j in 0..8 {
             match table[i * 8 + j] {

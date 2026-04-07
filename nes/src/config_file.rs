@@ -44,7 +44,7 @@ impl EmulatorConfig {
 
     /// Returns the fully qualified path to the config file
     /// Creates the directory that contains it if it doesn't already exist
-    fn config_file_name() -> String {
+    pub(crate) fn config_file_name() -> String {
         let mut path = dirs::config_dir().unwrap();
         path.push(CONFIG_DIR);
         if !path.exists() {

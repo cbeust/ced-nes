@@ -4,7 +4,6 @@ use tracing::info;
 use crate::config::Config;
 use crate::constants::OPERANDS_6502;
 use crate::disassembly::{Disassemble, RunDisassemblyLine};
-use crate::external_logger::{IExternalLogger, NoExternalLogger};
 use crate::labels::Labels;
 use crate::messages::{LogMsg, ToCpuUi, ToLogging};
 
@@ -67,8 +66,9 @@ impl Logging {
         println!("Logging thread exiting");
     }
 
-    fn log(&self, LogMsg { global_cycles, pc, operand, byte1, byte2, memory_content,
-            resolved_address, resolved_value, resolved_read, a, x, y, p, s }: LogMsg,
+    #[allow(unused_variables)]
+    fn log(&self, LogMsg { global_cycles, instruction_cycles, pc, operand, byte1, byte2, is_indexed,
+        memory_content, resolved_address, resolved_value, resolved_read, a, x, y, p, s }: LogMsg,
         labels: &Labels)
     {
         let operands = OPERANDS_6502;

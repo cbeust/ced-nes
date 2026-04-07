@@ -24,11 +24,9 @@ fn hh(v: u16, labels: &Labels) -> String {
     }
 }
 
-use std::collections::HashMap;
-use std::fmt::{Display, Formatter, Result};
-use crate::addressing_type::AddressingType::{Absolute_X, Absolute_Y};
 use crate::cpu::Cpu;
 use crate::memory::{DefaultMemory, Memory};
+use std::fmt::{Display, Formatter, Result};
 
 impl Display for AddressingType {
     fn fmt(&self, f: &mut Formatter) -> Result {
@@ -77,10 +75,6 @@ impl AddressingType {
     //         memory.word(w)
     //     }
 
-    fn word(&self, mem: &Vec<u8>, address: usize) -> u16 {
-        mem[address] as u16 | (mem[address + 1] as u16) << 8
-    }
-
     pub(crate) fn address<T: Memory>(&self, pc: u16, cpu: &mut Cpu<T>) -> u16 {
         use AddressingType::*;
 
@@ -91,7 +85,7 @@ impl AddressingType {
         fn zp(a: u8, b: u8) -> u8 {
             (a as u16 + b as u16) as u8
         }
-        fn word(mut memory: &mut impl Memory, a1 : u16, a2: u16) -> u16 {
+        fn word(memory: &mut impl Memory, a1 : u16, a2: u16) -> u16 {
             let result = (memory.get(a1) as u16) | (memory.get(a2) as u16) << 8;
             // println!("v1: {:02X}, v2: {:02X} value:{result:02X}", v1, v2);
             result

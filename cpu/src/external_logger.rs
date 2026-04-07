@@ -1,4 +1,3 @@
-use tracing::{event, info};
 use crate::disassembly::{Disassemble, RunDisassemblyLine};
 use crate::labels::Labels;
 use crate::messages::LogMsg;

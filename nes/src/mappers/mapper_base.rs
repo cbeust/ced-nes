@@ -62,7 +62,7 @@ impl MapperBase {
     pub fn new(rom: &Rom) -> Self {
         let mut config = MapperConfig::new(rom);
 
-        info!("{} CHR banks size ${:X}, {} PRG banks size ${:X}",
+        info!(target: "rom", "{} CHR banks size ${:X}, {} PRG banks size ${:X}",
             config.get_chr_bank_count(),
             config.chr_bank_size,
             config.get_prg_bank_count(),

@@ -13,6 +13,7 @@ use crate::constants::*;
 const _DEBUG_ASM: bool = true;
 const DEBUG_PC: u16 = 0;
 const DEBUG_CYCLES: u128 = u128::MAX; // 0x4FC1A00
+pub const LOG_ASYNC: bool = false;
 
 const STACK_ADDRESS: u16 = 0x100;
 
@@ -170,6 +171,10 @@ pub struct Cpu<T: Memory> {
     log_file: LogFile,
 }
 
+impl <T: Memory> Cpu<T> {
+    pub fn set_pc(&mut self, pc: u16) { self.pc = pc }
+}
+
 impl<T: Memory> Display for Cpu<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(&format!("A={:02X} X={:02X} Y={:02X} P={:02X} S={:02X} PC={:04X}",
@@ -224,7 +229,8 @@ impl <T: Memory> Cpu<T> {
         logger: Option<Box<dyn IExternalLogger>>) -> Cpu<T>
     {
         let operands = if config.is_65c02 { OPERANDS_65C02 } else { OPERANDS_6502 };
-        let log_file = LogFile::new(&config.trace_file_asm, Arc::new(RwLock::new(logger)), true, &config.labels,
+        let log_file = LogFile::new(&config.trace_file_asm, Arc::new(RwLock::new(logger)),
+            LOG_ASYNC, &config.labels,
             operands.clone());
         Cpu {
             memory,
@@ -256,7 +262,7 @@ impl <T: Memory> Cpu<T> {
     }
 
     pub fn one_cycle(&mut self, config: &mut Config,
-        breakpoints: &HashSet<u16>) -> bool
+        breakpoints: &HashSet<u16>) -> (bool, u8)
     {
         if self.wait_cycles == -1 || self.wait_cycles == 0 {
             let previous_pc = self.pc;
@@ -265,6 +271,7 @@ impl <T: Memory> Cpu<T> {
             // info!("OC: running instruction {:02X} {:?} at PC {:04X}", opcode, operand, self.pc);
             self.pc = self.pc.wrapping_add(operand.size as u16);
 
+            // info!("wait=0, running next instruction");
             self.next_instruction(previous_pc, config, breakpoints);
             self.wait_cycles = self.run_status.cycles() as i8 - 1;
             self.run_status = RunStatus::Continue(1);
@@ -275,14 +282,14 @@ impl <T: Memory> Cpu<T> {
                 self.handle_interrupt(false, lsb, msb);
                 self.pending_interrupt = None;
             }
-            true
+            (true, 1)
         } else {
             // info!("OC: waiting {}", self.wait_cycles);
             // info!("CPU WAITING");
             self.wait_cycles -= 1;
             self.run_status = RunStatus::Continue(1);
             self.cycles += 1;
-            false
+            (false, 1)
         }
     }
 
@@ -390,6 +397,7 @@ impl <T: Memory> Cpu<T> {
         let mut resolved_value: Option<u8> = None;
         let mut resolved_read = true;
         let mut resolved_before_memory: Option<u8> = None;
+        let mut is_indexed = false;
 
         // Save the registers for logging
         let a = self.a;
@@ -717,6 +725,7 @@ impl <T: Memory> Cpu<T> {
             STA_ZP | STA_ZP_X | STA_ABS | STA_ABS_X | STA_ABS_Y | STA_IND_X | STA_IND_Y | STA_ZPI_65C02 => {
                 if opcode == STA_ZPI_65C02 && ! self.is_65c02 {} else {
                     let address = addressing_type.address(pc, self);
+                    is_indexed = opcode == STA_ZP_X || opcode == STA_ABS_X;
                     if opcode == STA_ABS || opcode == STA_ABS_X {
                         resolved_before_memory = Some(self.memory.get_direct(address));
                     }
@@ -855,8 +864,8 @@ impl <T: Memory> Cpu<T> {
         if debug {
             let byte1 = self.memory.get(pc.wrapping_add(1));
             let byte2 = self.memory.get(pc.wrapping_add(2));
-            let log_msg = LogMsg::new(self.cycles, pc, operand.clone(),
-                byte1, byte2, resolved_before_memory,
+            let log_msg = LogMsg::new(self.cycles, cycles, pc, operand.clone(),
+                byte1, byte2, is_indexed, resolved_before_memory,
                 resolved_address, resolved_value, resolved_read,
                 a, x, y, p, s);
             self.log_file.log(log_msg);
@@ -1171,9 +1180,10 @@ impl <T: Memory> Cpu<T> {
         self.pc = new_pc;
     }
 
-    /// TODO:
-    /// add 1 cycle if branch on same page
-    /// add 2 cycles otherwise
+    /// 2 cycles if not taken
+    /// 3 cycles if taken
+    /// add 1 cycle if page crossed
+    /// The caller has already set the cycle count to 2
     fn branch(&mut self, pc: u16, condition: bool) -> u8 {
         let byte = self.memory.get(pc);
         let mut result = 0;

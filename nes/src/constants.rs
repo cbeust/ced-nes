@@ -1,4 +1,4 @@
-pub const CAP_FPS: Option<u16> = Some(1200);
+pub const CAP_FPS: Option<u16> = Some(60);
 
 pub const DONKEY_KONG: &str = "Donkey_Kong.nes";
 pub const PACMAN: &str = "PacMan2.nes";
@@ -6,11 +6,12 @@ pub const TRACE_FILE_NAME: &str = "trace.txt";
 
 const DEBUG: bool = false;
 pub const DEBUG_ASM: bool = DEBUG;
-pub const DEBUG_MESEN: bool = false;
+pub const CPU_TYPE_NEW: bool = true;
+pub const COMPARE_LOGS: bool = true;
+pub const DEBUG_MESEN: bool = true;
 pub const LOG_TO_FILE: bool = DEBUG;
-pub const LOG_ASYNC: bool = true;
 pub const USE_ICED: bool = true;
-pub const SELECTED_ROM: usize = 1900;
+pub const SELECTED_ROM: usize = 18;
 
 // Logging
 pub const IR: bool = false;
@@ -27,7 +28,7 @@ pub const SCALE_Y: f32 = 2.0;
 
 // pub const ALL_MAPPERS: [u8; 1] = [9];
 pub const ALL_MAPPERS: [u8; 9] = [0, 1, 2, 3, 4, 7, 9, 19, 66];
-pub const DEMO_DELAY_SECONDS: u64 = 2;
+pub const DEMO_DELAY_SECONDS: u64 = 5;
 
 use std::convert::Into;
 use once_cell::sync::Lazy;
@@ -111,6 +112,7 @@ pub static ROM_NAMES: Lazy<Vec<RomInfo>> = Lazy::new(|| {
         RomInfo::n2(15, "Bomberman Collection [p1].nes", "Bomberman"),
         RomInfo::n2(16, "AccuracyCoin.nes", "Accuracy Coin"),
         RomInfo::n2(17, "test-rom/test-rom.nes", "Test ROM"),
+        RomInfo::n2(18, "test-rom/apu_test.nes", "Test ROM"),
 
         // Mqpper 1
         RomInfo::n2(100, "Legend of Zelda, The (U) (V1.0) [!].nes", "Zelda"),
@@ -158,6 +160,9 @@ pub static ROM_NAMES: Lazy<Vec<RomInfo>> = Lazy::new(|| {
         RomInfo::n2(1900, "championship.nes", "PacMan Championship Edition"),
         RomInfo::n2(1901, "Battle Fleet (J) [!].nes", "Battle Fleet"),
         RomInfo::n2(1902, "Digital Devil Story - Megami Tensei II (J) (V1.0) [!].nes", "Digital Devil Story"),
+
+        // Mapper 69
+        RomInfo::n2(6900, "Honoo no Toukyuuji - Dodge Danpei 2 (Japan).nes", "Honoo"),
 
         // Tests
         RomInfo::n(551, "01.basics.nes"),

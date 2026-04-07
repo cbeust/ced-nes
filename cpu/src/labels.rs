@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use tracing::info;
 
 /// Labels struct that contains a HashMap mapping u16 addresses to String labels
 #[derive(Clone, Debug, Default)]

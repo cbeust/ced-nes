@@ -1,10 +1,10 @@
 use tracing::{debug, error, info, warn};
-use crate::constants::DONKEY_KONG;
+use crate::constants::{CPU_TYPE_NEW, DONKEY_KONG};
 use crate::emulator::CYCLES;
 use crate::mappers::mapper::{Mapper};
 use crate::mappers::mapper_config::MapperConfig;
 use crate::nes_memory::NesMemory;
-use crate::rom::{Mirroring, Rom, CHR_ROM_SIZE, PRG_ROM_SIZE};
+use crate::rom::{Mirroring, Rom, PRG_ROM_SIZE};
 
 /// MMC1, mapper 1
 pub struct MapperMMC1 {
@@ -55,13 +55,14 @@ impl MapperMMC1 {
 impl Mapper for MapperMMC1 {
     fn write_prg(&mut self, address: u16, value: u8, config: &mut MapperConfig) {
         if address < 0x8000 { return; }
-        // Ignore consecutive writes (e.g. INC)
-        let cycles = *CYCLES.read().unwrap();
-        if self.last_cycle_write == cycles {
-            return;
+        if ! CPU_TYPE_NEW {
+            // Ignore consecutive writes (e.g. INC)
+            let cycles = *CYCLES.read().unwrap();
+            if self.last_cycle_write == cycles {
+               return;
+            }
+            self.last_cycle_write = cycles;
         }
-
-        self.last_cycle_write = cycles;
 
         // Reset if bit 7 set
         if value & 0x80 != 0 {

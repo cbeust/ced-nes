@@ -16,5 +16,7 @@ pub mod labels;
 #[macro_use]
 pub mod macros;
 pub mod external_logger;
+pub mod compare_logs;
+pub mod cpu2;
 // mod test_json;
 

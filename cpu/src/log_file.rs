@@ -11,9 +11,10 @@ use crate::messages::LogMsg;
 use crate::operand::Operand;
 
 pub struct LogFile {
-    buffer: Arc<RwLock<Vec<String>>>,
+    // buffer: Arc<RwLock<Vec<String>>>,
     asyn: bool,
     tx: Sender<LogMessage>,
+    logger: Arc<RwLock<Option<Box<dyn IExternalLogger + 'static>>>>
 }
 
 const NL: &[u8] = "\n".as_bytes();
@@ -35,7 +36,7 @@ impl LogFile {
         let c = unbounded();
         let buffer = Arc::new(RwLock::new(Vec::new()));
         if asyn {
-            match File::create(file_name.clone()) {
+            match File::create(file_name) {
                 Ok(_) => {}
                 Err(error) => {
                     panic!("Couldn't create file {}: {}", &file_name, error);
@@ -65,18 +66,29 @@ impl LogFile {
                 }
             });
 
-        };
+        }
 
         Self {
-            buffer,
+            // buffer,
             // logger,
             asyn,
+            logger: logger.clone(),
             tx: c.0,
         }
     }
 
     pub fn log(&mut self, log_msg: LogMsg) {
-        self.tx.send(LogMessage::NewLog(log_msg, self.asyn)).unwrap();
+        if self.asyn {
+            self.tx.send(LogMessage::NewLog(log_msg, self.asyn)).unwrap();
+        } else {
+            let mut guard = self.logger.write().unwrap();
+            let logger = guard.as_mut().unwrap();
+            let strings = logger.log(log_msg, LABELS.get().unwrap(),
+                OPERANDS.get().unwrap());
+            for s in strings {
+                info!(target: "asm", "{s}");
+            }
+        }
     }
 
     fn received_new_log(logger: &mut Box<dyn IExternalLogger>,

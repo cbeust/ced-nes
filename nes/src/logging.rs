@@ -1,11 +1,13 @@
 use std::fs::File;
 use rolling_file::{BasicRollingFileAppender, RollingConditionBasic, RollingFileAppender};
+use tracing::info;
 use tracing_appender::non_blocking;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::FilterExt;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use cpu::cpu2::CPU2_DEBUG;
 use crate::constants::*;
 use crate::ppu::{CURRENT_CYCLE, CURRENT_SCANLINE};
 
@@ -36,11 +38,16 @@ pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGua
             }
 
             // Format the log message with level and fields
-            write!(writer, "{}:{} - {:03},{:03} - {}\n",
-                metadata.level(), metadata.target(),
-                *CURRENT_CYCLE.read().unwrap(),
-                *CURRENT_SCANLINE.read().unwrap(),
-                fields_buf)
+            if DEBUG_MESEN {
+                let h = CURRENT_CYCLE.read().unwrap();
+                write!(writer, "{fields_buf}\n")
+            } else {
+                write!(writer, "{}:{} - {:03},{:03} - {}\n",
+                    metadata.level(), metadata.target(),
+                    *CURRENT_CYCLE.read().unwrap(),
+                    *CURRENT_SCANLINE.read().unwrap(),
+                    fields_buf)
+            }
         }
     }
 
@@ -54,8 +61,9 @@ pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGua
     let rom_s = if ROM { "rom=debug" } else { "rom=off" };
     let mapper_s = if MAPPER { "mapper=debug" } else { "mapper=off" };
     let vbl_s = if VBL { "vbl=debug" } else { "vbl=off" };
+    let cpu_s = if CPU2_DEBUG { "cpu=debug" } else { "cpu=off" };
     let filter = EnvFilter::new(format!(
-        "info,{vbl_s},{ir_s},{vram_s},{rom_s},{mapper_s},ppu=off,sleep=off,oam=off,4014=off,frame=off,{ice_logs_off}"));
+        "info,{cpu_s},{vbl_s},{ir_s},{vram_s},{rom_s},{mapper_s},ppu=off,sleep=off,oam=off,4014=off,frame=off,{ice_logs_off}"));
 
     if let Some(file_name) = log_to_file {
         let dir = format!("{}\\t", dirs::home_dir().unwrap().to_str().unwrap());

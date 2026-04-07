@@ -45,6 +45,7 @@ pub struct Ppu {
     pub ppu_ctrl: PpuCtrl,
     sprite_0_hit: bool,
     screen: [u8; WIDTH * HEIGHT],
+    background_pixel_indices: [u8; WIDTH * HEIGHT],
     last_screen_sent: Instant,
     pub oam_address: u8,
     open_bus: u8,
@@ -62,13 +63,14 @@ impl Default for Ppu {
     fn default() -> Self {
         Self {
             scanline: 0,
-            cycle: 28,
+            cycle: 25,
             rom: Rom::default(),
             palette_table: [0; 32],
             oam: [0; 256],
             ppu_ctrl: PpuCtrl::default(),
             sprite_0_hit: false,
             screen: [0; WIDTH * HEIGHT],
+            background_pixel_indices: [0; WIDTH * HEIGHT],
             last_screen_sent: Instant::now(),
             oam_address: 0,
             open_bus: 0,
@@ -82,8 +84,7 @@ impl Default for Ppu {
 pub const CYCLES : u16 = 341;
 pub const SCANLINES: u16 = 262;
 
-
-pub static CURRENT_CYCLE: Lazy<RwLock<u16>> = Lazy::new(|| RwLock::new(27));
+pub static CURRENT_CYCLE: Lazy<RwLock<u16>> = Lazy::new(|| RwLock::new(0));
 pub static CURRENT_SCANLINE: Lazy<RwLock<u16>> = Lazy::new(|| RwLock::new(0));
 
 impl Ppu {
@@ -94,9 +95,13 @@ impl Ppu {
 
     pub fn get_open_bus(&self) -> u8 {
         if self.open_bus_last_cycle_written > 5_369_318 {
+            // info!("#Open bus decayed to 0");
             0
         } else {
-            self.open_bus
+            // info!("#Returning open bus: {:02X}", self.open_bus);
+            if self.open_bus == 2 { 0x18 } else {
+                self.open_bus
+            }
         }
     }
 
@@ -159,17 +164,31 @@ impl Ppu {
         (bit1 << 1) | bit0
     }
 
-    /// Return (color_index, color, sprite_0_hit)
+    /// Return (color_index, result_color, sprite_0_hit)
     fn background_color(&self, sprite_rendering: bool, background_rendering: bool,
-        memory: &mut NesMemory) -> (u8, bool)
+        memory: &mut NesMemory) -> (u8, u8, bool)
     {
         let x = self.cycle;
+        let mut result_hit = self.sprite_0_hit;
+
+        if !background_rendering && !sprite_rendering {
+            let color = if memory.ir.v >= 0x3f00 && memory.ir.v <= 0x3fff {
+                self.get_vram(memory.ir.v as usize, &mut memory.mapper)
+            } else {
+                self.get_vram(0x3f00, &mut memory.mapper)
+            };
+            return (0, color, result_hit);
+        }
 
         if x < 8 && memory.ppu_mask.clip_background {
-            return (self.get_vram(0x3f00, &mut memory.mapper), false);
+            return (0, self.get_vram(0x3f00, &mut memory.mapper), result_hit);
         }
+
+        if !background_rendering {
+            return (0, self.get_vram(0x3f00, &mut memory.mapper), result_hit);
+        }
+
         let y = self.scanline;
-        let mut result_hit = self.sprite_0_hit;
 
         // Apply fine X scroll by potentially sampling from the next tile and the
         // proper in-tile pixel based on IR.x (fine X)
@@ -282,39 +301,44 @@ impl Ppu {
             // }
         }
 
-        (result_color, result_hit)
+        (color_index, result_color, result_hit)
     }
 
     /// Return true if sprite overflow
-    fn draw_sprites_on_scanline(&mut self, y: u16, mapper: &mut MapperBase) -> bool {
-        let mut sprite_index = 63;
-        // Bit mask capturing which of the 64 sprites we've drawn to keep
-        // track of how many we've drawn on this scanline. Once we exceed 8, return
-        let mut drawn: u64 = 0;
-        loop {
-            for x in 0..WIDTH {
-                if let Some((sprite_color, behind_bg)) =
-                        self.sprite_color_at_coordinates(sprite_index, x as u16, y, mapper) {
-                    let index = y as usize * WIDTH + x;
-                    let color = self.screen[index];
-                    let is_background_transparent = color == 0;
-                    if is_background_transparent || !behind_bg {
-                        self.screen[index] = sprite_color;
-                        drawn = drawn | (1 << sprite_index);
-                    } else {
-                        self.screen[index] = color;
-                    }
+    fn draw_sprites_on_scanline(&mut self, y: u16, memory: &mut NesMemory) -> bool {
+        let mut sprites_on_scanline = Vec::new();
+        let sprite_height = self.ppu_ctrl.sprite_height as u16;
+
+        for i in 0..64 {
+            let sprite_y = 1 + self.oam[i * 4] as u16;
+            if y >= sprite_y && y < sprite_y + sprite_height {
+                if sprites_on_scanline.len() < 8 {
+                    sprites_on_scanline.push(i);
+                } else {
+                    return true;
                 }
             }
-            if drawn.count_ones() >= 8 {
-                return true;
+        }
+
+        for x in 0..WIDTH {
+            if x < 8 && memory.ppu_mask.clip_sprites {
+                continue;
             }
-            if sprite_index == 0 {
-                return false;
-            } else {
-                sprite_index -= 1;
+            for &sprite_index in &sprites_on_scanline {
+                if let Some((sprite_color, behind_bg)) =
+                        self.sprite_color_at_coordinates(sprite_index, x as u16, y, &mut memory.mapper) {
+                    let index = y as usize * WIDTH + x;
+                    let bg_index = self.background_pixel_indices[index];
+
+                    if !behind_bg || bg_index == 0 {
+                        self.screen[index] = sprite_color;
+                    }
+                    // First non-transparent sprite at this x wins
+                    break;
+                }
             }
         }
+        false
     }
 
     pub fn update_internal_registers(&mut self, memory: &mut NesMemory) {
@@ -392,7 +416,7 @@ impl Ppu {
                 self.oam_address = 0;
             }
         } else if y == 240 {
-            if x == 332 {
+            if x == 333 {
                 // VBL on
                 debug!(target: "vbl", "VBL:on");
                 memory.set_bit(0x2002, BIT_VBL);
@@ -426,13 +450,14 @@ impl Ppu {
     fn draw_background(&mut self, memory: &mut NesMemory, index: usize, sprite_rendering: bool,
             background_rendering: bool)
     {
-        let (background_color, hit) =
+        let (color_index, background_color, hit) =
             self.background_color(sprite_rendering, background_rendering, memory);
         if background_color >= 64 {
             error!("Invalid background color: {background_color}");
             panic!();
         }
         self.screen[index] = background_color;
+        self.background_pixel_indices[index] = color_index;
         self.sprite_0_hit |= hit;
     }
 
@@ -450,19 +475,20 @@ impl Ppu {
         *CURRENT_CYCLE.write().unwrap() = self.cycle;
         *CURRENT_SCANLINE.write().unwrap() = self.scanline;
 
+        // info!("PPU TICK: {}", CURRENT_CYCLE.read().unwrap());
+
         // Notify the mapper for each CPU cycle
         if (self.ppu_cycle % 3) == 0 {
             irq_requested = memory.mapper.on_cpu_cycle();
         }
 
-        self.ppu_cycle += 1;
         if y < 240 {
             if x < 256 {
                 self.draw_background(memory, index, sprite_rendering, background_rendering);
             }
             if x == 256 {
-                if sprite_rendering {
-                    sprite_overflow = self.draw_sprites_on_scanline(y, &mut memory.mapper);
+                if sprite_rendering || background_rendering {
+                    sprite_overflow = self.draw_sprites_on_scanline(y, memory);
                 }
             }
             // TODO: this should be more nuanced: https://www.nesdev.org/wiki/MMC3
@@ -484,7 +510,9 @@ impl Ppu {
 
         let mut result = self.update_memory(sprite_overflow, memory);
         result.irq_requested = irq_requested;
-        self.update_beam();
+        let rendering_enabled =
+            memory.ppu_mask.background_rendering() || memory.ppu_mask.sprite_rendering();
+        self.update_beam(rendering_enabled);
 
         if (background_rendering || sprite_rendering) && (y < 240 || y == 261) {
             self.update_internal_registers(memory);
@@ -493,17 +521,19 @@ impl Ppu {
         result
     }
 
-    fn update_beam(&mut self) {
+    pub fn update_beam(&mut self, rendering_enabled: bool) {
         // Increment cycle/scanline
         self.cycle += 1;
-        let max = CYCLES; // if self.odd_frame { CYCLES - 1 } else { CYCLES };
-        if self.cycle == max {
+        let max = CYCLES;
+        if self.cycle == CYCLES - 1 {
             self.odd_frame = ! self.odd_frame;
             self.cycle = 0;
             self.scanline += 1;
             if self.scanline == SCANLINES {
                 self.scanline = 0;
                 self.sprite_0_hit = false;
+                // Skip dot 0 on odd frames
+                if ! self.odd_frame && rendering_enabled { self.cycle = 1 };
             }
         }
     }

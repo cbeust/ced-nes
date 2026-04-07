@@ -1,6 +1,8 @@
 use std::sync::{Arc, RwLock};
+use iced::widget::value;
 use tracing::{debug, info};
 use cpu::memory::Memory;
+use crate::apu::Apu;
 use crate::mappers::mapper::*;
 pub(crate) use crate::internal_registers::IR;
 use crate::joypad::Joypad;
@@ -10,7 +12,7 @@ use crate::mappers::mapper_base::VramType::Vram;
 
 pub const MEMORY_SIZE: usize = 65_536;
 
-use crate::ppu::{Ppu, BIT_SPRITE_OVERFLOW, BIT_VBL};
+use crate::ppu::{Ppu, BIT_SPRITE_OVERFLOW, BIT_VBL, CURRENT_CYCLE, CURRENT_SCANLINE};
 use crate::ppu_ctrl::PpuCtrl;
 use crate::ppu_mask::PpuMask;
 use crate::rom::Mirroring;
@@ -25,14 +27,18 @@ pub struct NesMemory{
     pub ppu_mask: PpuMask,
     pub joypad: Arc<RwLock<Joypad>>,
     ppu: Arc<RwLock<Ppu>>,
+    apu: Arc<RwLock<Apu>>,
     internal_buffer: u8,
     pub mapper: MapperBase,
+    pub(crate) pause_cpu_for_dma: bool,
 }
 
 impl NesMemory{
     pub fn new(mapper: MapperBase,
         joypad: Arc<RwLock<Joypad>>,
-        ppu: Arc<RwLock<Ppu>>) -> Self
+        ppu: Arc<RwLock<Ppu>>,
+        apu: Arc<RwLock<Apu>>,
+    ) -> Self
     {
         let mut memory = Vec::<u8>::new();
         for i in 0..MEMORY_SIZE {
@@ -50,15 +56,20 @@ impl NesMemory{
             memory,
             joypad,
             ppu,
+            apu,
             internal_buffer: 0,
             mapper,
+            pause_cpu_for_dma: false,
         }
     }
 
     pub fn new_for_testing() -> Self {
         let mut result =
             NesMemory::new(MapperBase::default(),
-                Arc::new(RwLock::new(Joypad::new())), Arc::new(RwLock::new(Ppu::default())));
+                Arc::new(RwLock::new(Joypad::new())),
+                Arc::new(RwLock::new(Ppu::default())),
+                Arc::new(RwLock::new(Apu::new()))
+            );
         result.init = false;
         result
     }
@@ -176,6 +187,9 @@ impl NesMemory{
                     // $2002: bits 0 through 4 are open bus
                     result = (result & 0b1110_0000) | (self.ppu.read().unwrap().get_open_bus() & 0x1f);
                 }
+                0x2003 => {
+                    result = self.ppu.read().unwrap().get_open_bus() & 0x1f;
+                }
                 0x2004 => {
                     let oam_address = self.ppu.read().unwrap().oam_address;
                     result = self.ppu.read().unwrap().oam[oam_address as usize];
@@ -225,21 +239,42 @@ impl NesMemory{
                     // simultaneously (with normal wrapping behavior)
 
                 }
+                0x4015 => {
+                    result = self.apu.read().unwrap().get(address);
+                }
+
                 // Joypad
                 0x4016 => {
                     // TODO: Enabling this makes the cursor move down
                     result = self.joypad.write().unwrap().read();
                 }
-                _ => {
-                    result = self.ppu.read().unwrap().get_open_bus()
-                }
+                _ => {}
             }
+            self.ppu.write().unwrap().set_open_bus(result);
         }
+
+        // if address == 0x2002 || address == 0x2004 || address == 0x2007
+        //         || (address >= 0x2008 && address <= 0x3fff)
+        // {
+        //     self.ppu.write().unwrap().set_open_bus(result);
+        // }
+
         result
     }
 
     fn is_register(address: u16) -> bool {
-        (0x4014 <= address && address <= 0x4016) || (0x2000 <= address && address <= 0x2008)
+        match address {
+            0x4000..=0x400f | 0x4014..=0x4017 => {
+                true
+            }
+            0x2000..=0x2008 => {
+                true
+            }
+            _ => {
+                false
+            }
+        }
+        // (0x4014 <= address && address <= 0x4016) || (0x2000 <= address && address <= 0x2008)
     }
 
     fn set2(&mut self, original_address: u16, value: u8) {
@@ -343,20 +378,18 @@ impl NesMemory{
                         let v = self.get(address + i);
                         self.ppu.write().unwrap().write_oam(i2, v);
                     }
+                    self.pause_cpu_for_dma = true;
                     debug!(target: "oam", "Writing PPU $4014={value:02X}, \
                      copied 256 bytes from cpu[{:04X}] to OAM", address + offset as u16);
+                }
+                0x4000..0x400f | 0x4015 | 0x4017 => {
+                    self.apu.write().unwrap().set(address, value);
                 }
                 // Joypad
                 0x4016 => {
                     self.joypad.write().unwrap().write(value);
                 }
-                0x4017 => {
-                    self.joypad.write().unwrap().write(value);
-                }
                 _ => {
-                    self.ppu.write().unwrap().set_open_bus(value);
-                    // info!("Unhandled PPU register write at {address:04X}={value:02X}");
-                    // println!();
                 }
             }
             self.ppu.write().unwrap().set_open_bus(value);

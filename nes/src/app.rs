@@ -9,13 +9,10 @@ use iced::keyboard::Key;
 use iced::mouse::Cursor;
 use iced::widget::button::danger;
 use iced::widget::canvas::{Cache, Fill, Geometry, Program};
-use iced::widget::{Canvas, Column, Row, };
+use iced::widget::{Canvas, Column, Row, checkbox};
 use iced::*;
-use iced::{
-    widget::{button, column, container, row, scrollable, text, text_input},
-    Alignment, Application, Settings
-};
-use iced::widget::scrollable::{Id, AbsoluteOffset};
+use iced::{widget::{button, column, container, row, scrollable, text, text_input}, };
+use iced::widget::scrollable::{Id};
 use iced_futures::backend::default::time::every;
 use iced_futures::core::SmolStr;
 use iced_futures::Subscription;
@@ -40,6 +37,10 @@ pub struct App {
     selected_rom_index: Option<usize>,
     filter_text: String,
     scroll_id: Id,
+    triangle_enabled: bool,
+    pulse1_enabled: bool,
+    pulse2_enabled: bool,
+    noise_enabled: bool,
 }
 
 pub struct SharedState {
@@ -80,6 +81,10 @@ impl App {
             selected_rom_index,
             filter_text: String::new(),
             scroll_id: Id::unique(),
+            triangle_enabled: true,
+            pulse1_enabled: true,
+            pulse2_enabled: true,
+            noise_enabled: true,
         }
     }
 
@@ -163,6 +168,10 @@ pub enum AppMessage {
     Debug,
     RebootRandom,
     FilterTextChanged(String),
+    TriangleToggled(bool),
+    Pulse1Toggled(bool),
+    Pulse2Toggled(bool),
+    NoiseToggled(bool),
 }
 
 #[derive(Copy, Clone)]
@@ -174,6 +183,10 @@ pub enum ToUiMessage {
 #[derive(Clone)]
 pub enum ToEmulatorMessage {
     Reboot(RomInfo),
+    SoundPulse1(bool),
+    SoundPulse2(bool),
+    SoundTriangle(bool),
+    SoundNoise(bool),
     Debug,
 }
 
@@ -328,6 +341,22 @@ impl App {
             FilterTextChanged(text) => {
                 self.filter_text = text;
             }
+            TriangleToggled(enabled) => {
+                self.triangle_enabled = enabled;
+                self.sender_to_emulator.send(ToEmulatorMessage::SoundTriangle(enabled));
+            }
+            Pulse1Toggled(enabled) => {
+                self.pulse1_enabled = enabled;
+                self.sender_to_emulator.send(ToEmulatorMessage::SoundPulse1(enabled));
+            }
+            Pulse2Toggled(enabled) => {
+                self.pulse2_enabled = enabled;
+                self.sender_to_emulator.send(ToEmulatorMessage::SoundPulse2(enabled));
+            }
+            NoiseToggled(enabled) => {
+                self.noise_enabled = enabled;
+                self.sender_to_emulator.send(ToEmulatorMessage::SoundNoise(enabled));
+            }
         }
 
         Task::done(Ignored)
@@ -472,7 +501,12 @@ impl App {
         let buttons = container(Column::new()
             .spacing(10)
             .push(m_button("Reboot", AppMessage::Reboot).style(danger))
-            .push(m_button("Debug", AppMessage::Debug).style(danger)))
+            .push(m_button("Debug", AppMessage::Debug).style(danger))
+            .push(checkbox("Triangle", self.triangle_enabled).on_toggle(AppMessage::TriangleToggled))
+            .push(checkbox("Pulse1", self.pulse1_enabled).on_toggle(AppMessage::Pulse1Toggled))
+            .push(checkbox("Pulse2", self.pulse2_enabled).on_toggle(AppMessage::Pulse2Toggled))
+            .push(checkbox("Noise", self.noise_enabled).on_toggle(AppMessage::NoiseToggled))
+        )
             .style(|_theme| {
                 container::Style {
                     background: Some(Color::from_rgb(0.6, 0.6, 0.6).into()),
@@ -610,6 +644,18 @@ pub fn launch_emulator(mut args: Args, mut rom_info: RomInfo,
                         }
                         ToEmulatorMessage::Debug => {
                             emulator.debug();
+                        }
+                        ToEmulatorMessage::SoundPulse1(enabled) => {
+                            emulator.apu.write().unwrap().set_pulse1_enabled(enabled);
+                        }
+                        ToEmulatorMessage::SoundPulse2(enabled) => {
+                            emulator.apu.write().unwrap().set_pulse2_enabled(enabled);
+                        }
+                        ToEmulatorMessage::SoundTriangle(enabled) => {
+                            emulator.apu.write().unwrap().set_triangle_enabled(enabled);
+                        }
+                        ToEmulatorMessage::SoundNoise(enabled) => {
+                            emulator.apu.write().unwrap().set_noise_enabled(enabled);
                         }
                     }
                 }

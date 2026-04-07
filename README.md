@@ -22,8 +22,4 @@ Mappers supported:
 - CNRom (3)
 - MMC3 (4)
 - AxROM (7)
-- MMC2 (9)
-- 19 (19)
-- GxRom (66)
-- 
 

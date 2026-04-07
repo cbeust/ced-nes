@@ -3,11 +3,13 @@ use crate::operand::Operand;
 #[derive(Clone)]
 pub struct LogMsg {
     pub global_cycles: u128,
+    pub instruction_cycles: u8,
     pub pc: u16,
     pub operand: Operand,
     pub byte1: u8,
     pub byte2: u8,
     pub memory_content: Option<u8>,
+    pub is_indexed: bool,
     pub resolved_address: Option<u16>,
     pub resolved_value: Option<u8>,
     pub resolved_read: bool,
@@ -19,12 +21,13 @@ pub struct LogMsg {
 }
 
 impl LogMsg {
-    pub(crate) fn new(global_cycles: u128, pc: u16, operand: Operand, byte1: u8, byte2: u8,
-        memory_content: Option<u8>,
+    pub(crate) fn new(global_cycles: u128, instruction_cycles: u8,
+        pc: u16, operand: Operand, byte1: u8, byte2: u8,
+        is_indexed: bool, memory_content: Option<u8>,
         resolved_address: Option<u16>, resolved_value: Option<u8>, resolved_read: bool,
         a: u8, x: u8, y: u8, p: u8, s: u8) -> Self {
         Self {
-            global_cycles, pc, operand, byte1, byte2, memory_content,
+            global_cycles, instruction_cycles, pc, operand, byte1, byte2, is_indexed, memory_content,
             resolved_address, resolved_value,
             resolved_read, a, x, y, p, s
         }
