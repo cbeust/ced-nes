@@ -1,4 +1,4 @@
-use self::super::envelope::Envelope;
+use crate::apu::envelope::Envelope;
 
 // Noise period lookup table
 pub const NOISE_PERIOD_TABLE: [u16; 16] = [
@@ -36,9 +36,10 @@ impl Noise {
     }
 
     pub fn output(&self) -> u8 {
-        // if ! self.enabled || self.length_counter == 0 || (self.shift_reg & 1) != 0 {
-        //     return 0;
-        // }
+        if ! self.enabled || self.length_counter == 0 || (self.shift_reg & 1) != 0 {
+            return 0;
+        }
+
         if (self.reg_ctrl & 0x10) != 0 {
             // Variable volume
             self.reg_ctrl & 0xf
@@ -58,15 +59,15 @@ impl Noise {
     /// The shift register is shifted right by one bit.
     /// Bit 14, the leftmost bit, is set to the feedback calculated earlier
     pub fn clock_timer(&mut self) {
-        // if self.timer_counter == 0 {
+        if self.timer_counter == 0 {
             self.timer_counter = self.timer;
             // clock shift register
             let bit = if self.mode { 6 } else { 1 };
             let feedback = (self.shift_reg & 1) ^ ((self.shift_reg >> bit) & 1);
             self.shift_reg >>= 1;
             self.shift_reg |= feedback << 14;
-        // } else {
-        //     self.timer_counter -= 1;
-        // }
+        } else {
+            self.timer_counter -= 1;
+        }
     }
 }

@@ -1,5 +1,5 @@
+use crate::apu::envelope::Envelope;
 use crate::apu::LENGTH_TABLE;
-use super::envelope::Envelope;
 
 const DUTY_TABLE: [[u8; 8]; 4] = [
     [0, 1, 0, 0, 0, 0, 0, 0], // 12.5%
