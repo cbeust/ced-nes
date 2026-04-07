@@ -68,9 +68,7 @@ impl Triangle {
     }
 
     pub fn output(&self) -> u8 {
-        if ! self.enabled { 0 }
-        else if self.length_counter == 0 { 0 }
-        else if self.linear_counter == 0 { 0 }
+        if ! self.enabled || self.length_counter == 0 || self.linear_counter == 0 { 0 }
         else { TRIANGLE_TABLE[self.sequence_pos] }
     }
 
