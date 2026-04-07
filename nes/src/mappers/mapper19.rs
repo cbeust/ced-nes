@@ -1,11 +1,11 @@
-use tracing::{debug, info};
-use crate::mappers::mapper::{Mapper};
+use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_config::MapperConfig;
 use crate::rom::Rom;
+use tracing::{debug, info};
 
 pub struct Mapper19 {
     chr_rom: Vec<u8>,
-    prg_rom: Vec<u8>,
+    _prg_rom: Vec<u8>,
     prg_banks: [u8; 4],
 
     chr_banks: [u8; 12],
@@ -32,7 +32,7 @@ impl Mapper19 {
 
         Self {
             chr_rom: rom.chr_rom.clone(),
-            prg_rom: rom.prg_rom.clone(),
+            _prg_rom: rom.prg_rom.clone(),
             ciram: [0; 0x800],
             prg_banks: [0, 0, 0, config.get_prg_bank_count() as u8 - 1],
             chr_banks: [0; 12],

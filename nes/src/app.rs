@@ -9,10 +9,10 @@ use iced::keyboard::Key;
 use iced::mouse::Cursor;
 use iced::widget::button::danger;
 use iced::widget::canvas::{Cache, Fill, Geometry, Program};
-use iced::widget::{Canvas, Column, Row, checkbox};
+use iced::widget::scrollable::Id;
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{checkbox, Canvas, Column, Row};
 use iced::*;
-use iced::{widget::{button, column, container, row, scrollable, text, text_input}, };
-use iced::widget::scrollable::{Id};
 use iced_futures::backend::default::time::every;
 use iced_futures::core::SmolStr;
 use iced_futures::Subscription;
@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::{Receiver, Sender};
-use tracing::{debug, info};
+use tracing::{info};
 
 pub struct App {
     args: Args,
@@ -88,25 +88,6 @@ impl App {
         }
     }
 
-    /// Calculate the height of a ROM item based on its actual components
-    fn calculate_rom_item_height(&self) -> f32 {
-        // Text height for size 12 font (approximate)
-        let text_height = 12.0;
-        
-        // Column spacing and padding from rom_list.rs
-        let column_spacing = 2.0;
-        let column_padding = 2.0 * 2.0; // top and bottom padding
-        
-        // Button border (can be 1.0 or 2.0, using average)
-        let button_border = 1.5;
-        
-        // List spacing between items (from rom_list function)
-        let list_spacing = 2.0;
-        
-        // Total height calculation
-        text_height + column_spacing + column_padding + button_border * 2.0 + list_spacing
-    }
-
     pub fn subscription(&self) -> Subscription<AppMessage> {
         let rec = self.sender_to_ui.clone().subscribe();
         let cpu = iced_futures::futures::stream::unfold(
@@ -156,10 +137,7 @@ impl App {
 
 #[derive(Debug, Clone)]
 pub enum AppMessage {
-    MainWindowOpened(window::Id),
-    WindowClosed,
     Ignored,
-    Tick,
     GlobalEvent(Event),
     // Frequency, FPS
     Update(f32, u16),
@@ -209,16 +187,18 @@ impl Program<AppMessage> for App {
             // frame.fill(&bg, fill);
 
             // frame.scale(5.0);
-            let mut offset = 0;
+            let mut _offset = 0;
             let scale_x = SCALE_X;
             let scale_y = SCALE_Y * 1.0;
             unsafe {
-                for (index, color) in FRAME.iter().enumerate() {
+                // let frame = &raw const FRAME;
+                let f = &raw const FRAME;
+                for (index, color) in (*f).iter().enumerate() {
                     let rgb = PALETTE_TUPLES[*color as usize];
                     let fill = Fill::from(Color::from_rgb8(rgb.0, rgb.1, rgb.2));
                     let x = index % 256;
                     let y = index / 256;
-                    let xx = offset + scale_x as usize * x;
+                    let xx = _offset + scale_x as usize * x;
                     let yy = scale_y as usize * y;
                     // if x < 8 * scale as usize && y < 8 * scale as usize {
                     //     info!("Drawing {x},{y} = {},{},{}", rgb.0, rgb.1, rgb.2);
@@ -230,7 +210,7 @@ impl Program<AppMessage> for App {
                     // frame.fill(&path, fill);
                 }
             }
-            offset += 8 * scale_x as usize;
+            _offset += 8 * scale_x as usize;
         });
 
         result.push(geometry);
@@ -247,14 +227,6 @@ impl App {
     pub fn update(&mut self, message: AppMessage) -> Task<AppMessage> {
         use AppMessage::*;
         match message {
-            MainWindowOpened(id) => {
-                info!("Main NES window opened, id: {id:#?}");
-            }
-            Tick => {}
-            WindowClosed => {
-                println!("Window closed");
-                std::process::exit(0);
-            }
             Ignored => {
             }
             GlobalEvent(event) => {
@@ -343,19 +315,19 @@ impl App {
             }
             TriangleToggled(enabled) => {
                 self.triangle_enabled = enabled;
-                self.sender_to_emulator.send(ToEmulatorMessage::SoundTriangle(enabled));
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundTriangle(enabled));
             }
             Pulse1Toggled(enabled) => {
                 self.pulse1_enabled = enabled;
-                self.sender_to_emulator.send(ToEmulatorMessage::SoundPulse1(enabled));
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundPulse1(enabled));
             }
             Pulse2Toggled(enabled) => {
                 self.pulse2_enabled = enabled;
-                self.sender_to_emulator.send(ToEmulatorMessage::SoundPulse2(enabled));
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundPulse2(enabled));
             }
             NoiseToggled(enabled) => {
                 self.noise_enabled = enabled;
-                self.sender_to_emulator.send(ToEmulatorMessage::SoundNoise(enabled));
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundNoise(enabled));
             }
         }
 
@@ -398,7 +370,7 @@ impl App {
     //         .into()
     // }
 
-    fn rom_info_box(&self) -> Element<AppMessage> {
+    fn rom_info_box(&self) -> Element<'_, AppMessage> {
         let (name, mapper_number) = if let Some(index) = self.selected_rom_index {
             let current_rom = &self.roms[index];
             let mapper_num_str = current_rom.mapper_number().to_string();
@@ -416,7 +388,7 @@ impl App {
                 .size(12)
                 .style(|_theme| text::Style { color: Some(Color::from_rgb(1.0, 1.0, 0.0)) })
         ]
-        .align_y(iced::Alignment::Start)
+        .align_y(Alignment::Start)
         .spacing(20)
         .padding(15);
 
@@ -436,7 +408,7 @@ impl App {
             .into()
     }
 
-    fn rom_list(&self) -> Element<AppMessage> {
+    fn rom_list(&self) -> Element<'_, AppMessage> {
         let items_column = self.roms.iter().enumerate()
             .filter(|(_, rom)| {
                 if self.filter_text.is_empty() {
@@ -457,7 +429,6 @@ impl App {
                     col.push(create_rom_item(is_selected, item).map(move |message| {
                         match message {
                             crate::listview::Message::ItemClicked(_) => AppMessage::RomSelected(index),
-                            _ => AppMessage::Ignored,
                         }
                     }))
                 }
@@ -478,7 +449,7 @@ impl App {
         .into()
     }
 
-    fn rom_panel(&self) -> Element<AppMessage> {
+    fn rom_panel(&self) -> Element<'_, AppMessage> {
         let filter_input = text_input("Filter ROMs...", &self.filter_text)
             .on_input(AppMessage::FilterTextChanged)
             .padding(10)
@@ -493,7 +464,7 @@ impl App {
         .into()
     }
 
-    pub fn view(&self) -> Element<AppMessage> {
+    pub fn view(&self) -> Element<'_, AppMessage> {
         let canvas = Canvas::new(self)
             .width(Length::Fixed(WIDTH as f32 * SCALE_X))
             .height(Length::Fixed(HEIGHT as f32 * SCALE_Y));
@@ -576,7 +547,7 @@ impl App {
     }
 }
 
-pub fn launch_emulator(mut args: Args, mut rom_info: RomInfo,
+pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
     sender: Sender<ToUiMessage>, mut receiver: Receiver<ToEmulatorMessage>) ->
     (Arc<RwLock<SharedState>>, Arc<RwLock<Joypad>>)
 {
@@ -628,7 +599,7 @@ pub fn launch_emulator(mut args: Args, mut rom_info: RomInfo,
                         if elapsed < time_wait_ms {
                             let sleep_ms = time_wait_ms - elapsed;
                             // info!("  sleeping {sleep_ms}");
-                            thread::sleep(Duration::from_millis((sleep_ms) as u64));
+                            thread::sleep(Duration::from_millis(sleep_ms as u64));
                             emulator.frame_count.drain(0..frame_cap_divided as usize);
                             emulator.frame_count_last = Instant::now();
                         }
@@ -668,7 +639,7 @@ pub fn launch_emulator(mut args: Args, mut rom_info: RomInfo,
 }
 
 /// A bigger and round button
-pub fn m_button(label: &str, message: AppMessage) -> iced::widget::Button<'_, AppMessage> {
+pub fn m_button(label: &str, message: AppMessage) -> widget::Button<'_, AppMessage> {
     let b = button(
         text(label)
             .align_x(Horizontal::Center)
@@ -678,9 +649,9 @@ pub fn m_button(label: &str, message: AppMessage) -> iced::widget::Button<'_, Ap
         // .style(iced::theme::Button::Custom(Box::new(MyButtonStyle)))
         .on_press(message);
 
-    let mut border = Border::default();
-    border.width = 3.0;
-    border.color = Color::WHITE;
+    let mut _border = Border::default();
+    _border.width = 3.0;
+    _border.color = Color::WHITE;
     b
     // .padding(10.0)
     // .style(

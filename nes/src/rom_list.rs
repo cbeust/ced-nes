@@ -1,14 +1,14 @@
-use std::collections::HashMap;
+use crate::constants::RomInfo;
+use crate::listview::Message;
+use iced::widget::{button, container, text};
+use iced::{Background, Border, Color, Element, Length};
+use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use iced::{Background, Border, Color, Element, Length};
-use iced::widget::{button, container, text};
-use rayon::iter::IntoParallelIterator;
 use tracing::info;
 use walkdir::WalkDir;
-use crate::constants::RomInfo;
-use crate::listview::{Message};
 
 pub fn create_rom_item(is_selected: bool, item: RomInfo) -> Element<'static, Message> {
     // let is_selected = selected_rom_id == item.id as usize;
@@ -77,7 +77,7 @@ pub fn create_rom_item(is_selected: bool, item: RomInfo) -> Element<'static, Mes
 }
 
 
-pub fn display_roms_by_mapper(path: &str) {
+pub fn _display_roms_by_mapper(path: &str) {
     let entries: Vec<_> = WalkDir::new(path)
         .into_iter()
         .filter_map(|e| e.ok())

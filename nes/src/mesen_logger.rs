@@ -1,18 +1,15 @@
-use crate::ppu::{CURRENT_CYCLE, CURRENT_SCANLINE, SCANLINES};
 use cpu::external_logger::IExternalLogger;
 use cpu::labels::Labels;
 use cpu::messages::LogMsg;
 use cpu::operand::Operand;
 use once_cell::sync::Lazy;
 use std::fs::File;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::RwLock;
-use crate::emulator::CYCLES;
 
 pub struct MesenLogger {
     count: u32,
-    file: File,
+    _file: File,
 }
 
 pub static LOG_CYCLE: Lazy<RwLock<u16>> = Lazy::new(|| RwLock::new(0));
@@ -30,7 +27,7 @@ impl Default for MesenLogger {
         let file = File::create(file_name).expect("File created");
         Self {
             count: 0,
-            file,
+            _file: file,
         }
     }
 }

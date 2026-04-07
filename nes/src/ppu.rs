@@ -1,14 +1,14 @@
+use crate::constants::*;
 use crate::emulator::FRAME;
-use crate::nes_memory::NesMemory;
-use crate::rom::Rom;
 use crate::get_bit;
+use crate::mappers::mapper_base::{MapperBase};
+use crate::nes_memory::NesMemory;
+use crate::ppu_ctrl::PpuCtrl;
+use crate::rom::Rom;
 use once_cell::sync::Lazy;
 use std::sync::RwLock;
 use std::time::Instant;
-use tracing::{debug, error, info};
-use crate::constants::*;
-use crate::mappers::mapper_base::{MapperBase, VramType};
-use crate::ppu_ctrl::PpuCtrl;
+use tracing::{debug, error};
 
 #[derive(Default)]
 pub struct PpuResult {
@@ -524,7 +524,7 @@ impl Ppu {
     pub fn update_beam(&mut self, rendering_enabled: bool) {
         // Increment cycle/scanline
         self.cycle += 1;
-        let max = CYCLES;
+        let _max = CYCLES;
         if self.cycle == CYCLES - 1 {
             self.odd_frame = ! self.odd_frame;
             self.cycle = 0;

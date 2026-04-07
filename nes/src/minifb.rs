@@ -1,12 +1,10 @@
 use crate::app::{launch_emulator, ToEmulatorMessage, ToUiMessage};
-use crate::emulator::FRAME;
+use crate::constants::*;
 use crate::joypad::Button;
+use crate::Args;
 use minifb::Scale::X2;
 use minifb::{Key, Window, WindowOptions};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
-use crate::Args;
-use crate::color::PALETTE_U32;
-use crate::constants::*;
 
 pub fn main_minifb(args: Args) {
     // Create a new Tokio runtime to execute the async code
@@ -17,9 +15,9 @@ pub fn main_minifb(args: Args) {
 }
 
 async fn run_minifb_async(args: Args) {
-    let (sender_to_ui, receiver_from_ui): (Sender<ToUiMessage>, Receiver<ToUiMessage>)
+    let (sender_to_ui, _receiver_from_ui): (Sender<ToUiMessage>, Receiver<ToUiMessage>)
         = channel(10);
-    let (sender_to_emulator, receiver_from_emulator):  (Sender< ToEmulatorMessage >, Receiver<ToEmulatorMessage >)
+    let (_sender_to_emulator, receiver_from_emulator):  (Sender< ToEmulatorMessage >, Receiver<ToEmulatorMessage >)
         = channel(10);
     let d = RomInfo::default().file_name.clone();
     let file_name = args.rom_names.first().unwrap_or(&d);
@@ -58,7 +56,7 @@ async fn run_minifb_async(args: Args) {
     ];
     let mut run = true;
 
-    let mut buffer: Vec<u32> = vec![0; WIDTH * HEIGHT];
+    let buffer: Vec<u32> = vec![0; WIDTH * HEIGHT];
     while run {
         run = window.is_open() && !window.is_key_down(Key::Escape);
         for (key, button) in &map {

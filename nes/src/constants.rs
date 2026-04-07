@@ -7,7 +7,7 @@ pub const TRACE_FILE_NAME: &str = "trace.txt";
 const DEBUG: bool = false;
 pub const DEBUG_ASM: bool = DEBUG;
 pub const CPU_TYPE_NEW: bool = true;
-pub const COMPARE_LOGS: bool = true;
+pub const _COMPARE_LOGS: bool = true;
 pub const DEBUG_MESEN: bool = true;
 pub const LOG_TO_FILE: bool = DEBUG;
 pub const USE_ICED: bool = true;
@@ -30,15 +30,15 @@ pub const SCALE_Y: f32 = 2.0;
 pub const ALL_MAPPERS: [u8; 9] = [0, 1, 2, 3, 4, 7, 9, 19, 66];
 pub const DEMO_DELAY_SECONDS: u64 = 5;
 
-use std::convert::Into;
 use once_cell::sync::Lazy;
+use std::convert::Into;
 
 pub const WINDOW_TITLE: &str = "CedNES";
 
 #[derive(Clone, Debug)]
 pub struct RomInfo {
     pub file_name: String,
-    pub name: Option<String>,
+    pub _name: Option<String>,
     pub id: usize,
 }
 
@@ -59,7 +59,8 @@ impl RomInfo {
 
     fn n3(id: usize, file_name: String, name: Option<String>) -> Self {
         Self {
-            file_name, name, id,
+            file_name,
+            _name: name, id,
         }
     }
 

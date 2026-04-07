@@ -8,9 +8,6 @@ mod joypad;
 mod app;
 mod minifb;
 mod constants;
-mod pattern;
-mod sprite;
-mod style;
 mod listview;
 mod rom_list;
 mod bits;
@@ -28,18 +25,14 @@ mod mappers;
 mod mesen_logger;
 // mod test_rom;
 
-use std::env::home_dir;
-use crate::constants::{RomInfo, ALL_MAPPERS, COMPARE_LOGS, CPU_TYPE_NEW, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM, TRACE_FILE_NAME, USE_ICED};
-use crate::iced::main_iced;
-use crate::minifb::main_minifb;
-use std::process::exit;
-use tracing::{debug, error, info, span, Level, Subscriber};
-use clap::Parser;
-use cpu::compare_logs::compare_log;
-use crate::color::{PALETTE_TUPLES, PALETTE_U32};
 use crate::config_file::EmulatorConfig;
+use crate::constants::{RomInfo, ALL_MAPPERS, CPU_TYPE_NEW, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM, TRACE_FILE_NAME, USE_ICED};
+use crate::iced::main_iced;
 use crate::logging::init_logging;
+use crate::minifb::main_minifb;
 use crate::rom_list::find_roms_with_mappers;
+use clap::Parser;
+use tracing::debug;
 
 #[derive(Default, Debug, Parser)]
 #[command(author, version, about, long_about = None)]
@@ -78,18 +71,6 @@ impl Clone for Args {
             dev: false,
         }
     }
-}
-
-fn convert() {
-    print!("    ");
-    for i in 0..PALETTE_TUPLES.len() {
-        let v = PALETTE_TUPLES[i];
-        print!("0x{:06X}, ", (v.0 as u32) << 16 | (v.1 as u32) << 8 | (v.2 as u32));
-        if i > 0 && (i + 1) % 5 == 0 {
-            print!("\n    ");
-        }
-    }
-    println!();
 }
 
 // #[tokio::main]
@@ -147,7 +128,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 &SELECTED_ROM
             };
-        let index = roms.iter().enumerate().find(|(index, rom)| rom.id == *index2)
+        let index = roms.iter().enumerate().find(|(_index, rom)| rom.id == *index2)
             .map_or(0, |(index, _)| index);
         // .cloned().unwrap_or(ROM_NAMES[0].clone());
         if args.rom_names.is_empty() {

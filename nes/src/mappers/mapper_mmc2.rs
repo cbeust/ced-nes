@@ -1,8 +1,8 @@
-use tracing::{debug, info};
-use crate::mappers::mapper::{Mapper};
+use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_config::MapperConfig;
 use crate::rom::Mirroring::{Horizontal, Vertical};
 use crate::rom::Rom;
+use tracing::{debug};
 
 pub struct MapperMMC2 {
     left_latch: usize,

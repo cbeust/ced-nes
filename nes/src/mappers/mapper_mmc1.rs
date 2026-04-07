@@ -1,10 +1,10 @@
-use tracing::{debug, error, info, warn};
-use crate::constants::{CPU_TYPE_NEW, DONKEY_KONG};
+use crate::constants::{CPU_TYPE_NEW};
 use crate::emulator::CYCLES;
-use crate::mappers::mapper::{Mapper};
+use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_config::MapperConfig;
 use crate::nes_memory::NesMemory;
 use crate::rom::{Mirroring, Rom, PRG_ROM_SIZE};
+use tracing::{debug};
 
 /// MMC1, mapper 1
 pub struct MapperMMC1 {

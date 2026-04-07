@@ -1,18 +1,14 @@
-use std::sync::{Arc, RwLock};
-use iced::widget::value;
-use tracing::{debug, info};
-use cpu::memory::Memory;
 use crate::apu::Apu;
-use crate::mappers::mapper::*;
 pub(crate) use crate::internal_registers::IR;
 use crate::joypad::Joypad;
-use crate::mappers::mapper0::Mapper0;
 use crate::mappers::mapper_base::{MapperBase, VramType};
-use crate::mappers::mapper_base::VramType::Vram;
+use cpu::memory::Memory;
+use std::sync::{Arc, RwLock};
+use tracing::{debug};
 
 pub const MEMORY_SIZE: usize = 65_536;
 
-use crate::ppu::{Ppu, BIT_SPRITE_OVERFLOW, BIT_VBL, CURRENT_CYCLE, CURRENT_SCANLINE};
+use crate::ppu::{Ppu, BIT_SPRITE_OVERFLOW, BIT_VBL};
 use crate::ppu_ctrl::PpuCtrl;
 use crate::ppu_mask::PpuMask;
 use crate::rom::Mirroring;
@@ -41,7 +37,7 @@ impl NesMemory{
     ) -> Self
     {
         let mut memory = Vec::<u8>::new();
-        for i in 0..MEMORY_SIZE {
+        for _i in 0..MEMORY_SIZE {
             memory.push(0);
             // if i < 0x4800 { memory.push(0); }
             // else { memory.push((i / 256) as u8); }
@@ -120,23 +116,23 @@ impl NesMemory{
         match mirroring {
             Mirroring::Vertical => {
                 if (0x2000..0x2400).contains(&address) || (0x2800..0x2c00).contains(&address) {
-                    Vram_A
+                    VramA
                 } else {
-                    Vram_B
+                    VramB
                 }
             }
             Mirroring::Horizontal => {
                 if (0x2000..0x2800).contains(&address) {
-                    Vram_A
+                    VramA
                 } else {
-                     Vram_B
+                    VramB
                  }
             }
             Mirroring::ScreenA => {
-                Vram_A
+                VramA
             }
             Mirroring::ScreenB => {
-                Vram_B
+                VramB
             }
             _ => {
                 panic!("Unknown mirroring: {mirroring:?}");
@@ -349,7 +345,7 @@ impl NesMemory{
                     // PPUDATA
 
                     let a = self.ir.v as usize & 0x3fff;
-                    let a2 = Self::nametable_mirroring(self.mapper.mirroring(), a);
+                    let _a2 = Self::nametable_mirroring(self.mapper.mirroring(), a);
 
                     self.ppu.write().unwrap().set_vram(a, value, &mut self.mapper);
                     // Palette mirroring: addresses 0x3F00/0x3F10, 0x3F04/0x3F14, 0x3F08/0x3F18,

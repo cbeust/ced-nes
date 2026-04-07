@@ -72,7 +72,7 @@ pub fn test_ppu2() {
 // }
 // #[cfg(test)]
 fn mirror(mut mirrors: Range<u16>, addresses: Range<u16>, mirror_fn: impl Fn(u16) -> u16) {
-    let mut index = 0;
+    let mut _index = 0;
     let mirrors_array: Vec<u16> = mirrors.collect();
     let mut mirrors_index = 0;
 
@@ -465,14 +465,14 @@ pub fn test_bits() {
 pub fn test_nametable_mirroring() {
     use crate::mappers::mapper_base::VramType::*;
     let data = vec![
-        (Mirroring::Horizontal, 0x2368, Vram_A),
-        (Mirroring::Horizontal, 0x2768, Vram_A),
-        (Mirroring::Horizontal, 0x2801, Vram_B),
-        (Mirroring::Horizontal, 0x2c01, Vram_B),
-        (Mirroring::Vertical, 0x2768, Vram_B),
-        (Mirroring::Vertical, 0x2f68, Vram_B),
-        (Mirroring::Vertical, 0x2001, Vram_A),
-        (Mirroring::Vertical, 0x2801, Vram_A),
+        (Mirroring::Horizontal, 0x2368, VramA),
+        (Mirroring::Horizontal, 0x2768, VramA),
+        (Mirroring::Horizontal, 0x2801, VramB),
+        (Mirroring::Horizontal, 0x2c01, VramB),
+        (Mirroring::Vertical, 0x2768, VramB),
+        (Mirroring::Vertical, 0x2f68, VramB),
+        (Mirroring::Vertical, 0x2001, VramA),
+        (Mirroring::Vertical, 0x2801, VramA),
         (Mirroring::Horizontal, 0x100, Vram),
         (Mirroring::Vertical, 0x100, Vram),
         (Mirroring::FourScreen, 0x3001, Vram),

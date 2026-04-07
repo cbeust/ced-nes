@@ -1,9 +1,8 @@
-use std::path::PathBuf;
-use tracing::{debug, info, warn};
-use tracing::field::debug;
-use crate::mappers::mapper::{Mapper};
+use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_config::MapperConfig;
-use crate::rom::{Mirroring, Rom, PRG_ROM_SIZE};
+use crate::rom::{Mirroring, Rom};
+use std::path::PathBuf;
+use tracing::{debug};
 
 /// CNRom, Mapper 2
 /// https://www.nesdev.org/wiki/CNROM
@@ -147,7 +146,7 @@ impl MapperMMC3 {
     }
 }
 
-pub fn test_mapper3() {
+pub fn _test_mapper3() {
     let file_name = [dirs::home_dir().unwrap().to_str().unwrap(),
         "rust", "sixty.rs", "nes", "Donkey Kong - Original Edition (U) (VC) [!].nes"
     ]

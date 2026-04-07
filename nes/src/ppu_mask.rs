@@ -1,5 +1,4 @@
 use std::fmt::{Display, Formatter};
-use tracing::info;
 
 /// PPUMASK
 /// 7  bit  0

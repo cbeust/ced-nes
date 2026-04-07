@@ -1,10 +1,10 @@
 use std::fs;
 use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::{info};
 
 // Name of the config file, which is saved under whatever dirs::config_dir() returns
 const CONFIG_DIR: &str = "ced-nes";

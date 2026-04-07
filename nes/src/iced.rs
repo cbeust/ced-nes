@@ -1,8 +1,8 @@
-use crate::{app, Args};
-use crate::app::{launch_emulator, ToEmulatorMessage, ToUiMessage};
-use ::iced::{application, settings, window, Task, Size};
-use tokio::sync::broadcast::{channel, Receiver, Sender};
+use crate::app::launch_emulator;
 use crate::constants::*;
+use crate::{app, Args};
+use ::iced::{application, settings, window, Size, Task};
+use tokio::sync::broadcast::channel;
 
 pub fn main_iced(args: Args, roms: Vec<RomInfo>, rom_info: RomInfo) {
     let (sender_to_ui, _receiver_from_ui) = channel(10);

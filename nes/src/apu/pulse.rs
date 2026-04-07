@@ -8,33 +8,48 @@ const DUTY_TABLE: [[u8; 8]; 4] = [
     [1, 0, 0, 1, 1, 1, 1, 1], // 25% negated
 ];
 
+// Pulse
+// https://www.nesdev.org/wiki/APU_Pulse
 #[derive(Default, Clone)]
 pub struct Pulse {
-    // register values (raw writes)
     pub reg_ctrl: u8,      // $4000/$4004 - duty, loop, constant vol, volume
-    pub reg_sweep: u8,     // $4001/$4005 - sweep unit
-    pub reg_timer_lo: u8,  // $4002/$4006 - timer low
-    pub reg_timer_hi: u8,  // $4003/$4007 - length counter load, timer high
+    reg_sweep: u8,     // $4001/$4005 - sweep unit
+    reg_timer_lo: u8,  // $4002/$4006 - timer low
+    reg_timer_hi: u8,  // $4003/$4007 - length counter load, timer high
 
     // internal state
-    pub timer: u16,          // 11-bit timer (period)
-    pub timer_counter: u16,  // counts down
-    pub duty_pos: usize,        // where we are in the duty cycle (0-7)
+    timer: u16,          // 11-bit timer (period)
+    timer_counter: u16,  // counts down
+    duty_pos: usize,        // where we are in the duty cycle (0-7)
     pub length_counter: u8,  // counts down, channel silenced when 0
-    pub envelope: Envelope,
+    envelope: Envelope,
 
     // sweep unit
-    pub sweep_reload: bool,
-    pub sweep_counter: u8,
-    pub sweep_enabled: bool,
-    pub sweep_negate: bool,
-    pub sweep_period: u8,
-    pub sweep_shift: u8,
+    sweep_reload: bool,
+    sweep_counter: u8,
+    sweep_enabled: bool,
+    sweep_negate: bool,
+    sweep_period: u8,
+    sweep_shift: u8,
 
     pub enabled: bool,
 }
 
 impl Pulse {
+    pub fn set(&mut self, address: u16, val: u8) {
+        let a = address & 0x03;
+        match a {
+            0 => { self.reg_ctrl = val; }
+            1 => { self.sweep_control(val); }
+            2 => {
+                self.reg_timer_lo = val;
+                self.timer = (self.timer & 0x0700) | val as u16;
+            }
+            3 => { self.set_timer_high(val); }
+            _ => unreachable!(),
+        }
+    }
+
     pub fn clock_timer(&mut self) {
         if self.timer_counter == 0 {
             self.timer_counter = self.timer;
@@ -50,7 +65,7 @@ impl Pulse {
 
     pub fn clock_sweep(&mut self, is_pulse1: bool) {
         let change = self.timer >> self.sweep_shift;
-        let mut target = 0;
+        let mut target;
         if self.sweep_negate {
             target = self.timer - change;
             if is_pulse1 {

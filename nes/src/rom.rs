@@ -1,9 +1,8 @@
+use crate::is_set;
 use std::cmp::min;
 use std::fs::File;
-use tracing::{debug};
 use std::io::Read;
-use crate::is_set;
-use crate::pattern::Pattern;
+use tracing::debug;
 
 #[derive(Clone, Debug, Default)]
 pub struct Header {
@@ -12,15 +11,15 @@ pub struct Header {
     /// 8 KB units (0 means the board uses CHR RAM)
     pub chr_rom_count: usize,
     // Memory backed ram at $6000-$7FFF
-    battery_backed_ram: bool,
+    _battery_backed_ram: bool,
     // Byte trainer at $7000-$71FF
     // byte_trainer: bool,
-    four_screen_mirroring: bool,
-    mapper_number: u16,
-    submapper_number: u16,
+    _four_screen_mirroring: bool,
+    _mapper_number: u16,
+    _submapper_number: u16,
     pub(crate) mirroring: Mirroring,
-    chr_ram_size: usize,
-    chr_nvram_size: usize,
+    _chr_ram_size: usize,
+    _chr_nvram_size: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -83,8 +82,8 @@ impl Rom {
         let byte6 = buffer[6] as u16;
         let byte7 = buffer[7] as u16;
         let byte8 = buffer[8] as u16;
-        let mapper_number = (byte6 & 0xf0) >> 4 | (byte7 & 0xf0) | (byte8 & 0xf) << 8;
-        let submapper_number = (byte8 & 0xf0) >> 4;
+        let _mapper_number = (byte6 & 0xf0) >> 4 | (byte7 & 0xf0) | (byte8 & 0xf) << 8;
+        let _submapper_number = (byte8 & 0xf0) >> 4;
         let vertical_mirroring = is_set!(byte6, 0);
         let four_screen = is_set!(byte6, 3);
         let mirroring = match (four_screen, vertical_mirroring) {
@@ -96,13 +95,13 @@ impl Rom {
         let header = Header {
             prg_rom_count: buffer[4] as usize | ((buffer[9] as usize & 0xf) << 4),
             chr_rom_count: buffer[5] as usize | (buffer[9] as usize & 0xf0),
-            battery_backed_ram: is_set!(byte6, 1),
+            _battery_backed_ram: is_set!(byte6, 1),
             // byte_trainer: is_set!(byte6, 2),
-            four_screen_mirroring: is_set!(byte6, 3),
-            chr_ram_size: buffer[11] as usize & 0xf,
-            chr_nvram_size: (buffer[11] as usize & 0xf0) >> 4,
-            mapper_number,
-            submapper_number,
+            _four_screen_mirroring: is_set!(byte6, 3),
+            _chr_ram_size: buffer[11] as usize & 0xf,
+            _chr_nvram_size: (buffer[11] as usize & 0xf0) >> 4,
+            _mapper_number,
+            _submapper_number,
             mirroring,
         };
 
@@ -112,7 +111,7 @@ impl Rom {
             file_name, buffer.len(),
             prg_size, prg_size / 1024,
             chr_size, chr_size / 1024,
-            mapper_number);
+            _mapper_number);
         debug!(target: "rom", "Header: {header:#?}");
 
         //
@@ -157,8 +156,8 @@ impl Rom {
             chr_rom,
             prg_rom,
             // prg_ram: Vec::new(),
-            mapper: mapper_number,
-            submapper: submapper_number,
+            mapper: _mapper_number,
+            submapper: _submapper_number,
         };
 
         Ok(rom)

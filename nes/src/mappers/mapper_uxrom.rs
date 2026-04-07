@@ -1,6 +1,6 @@
-use crate::mappers::mapper::{Mapper};
+use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_config::MapperConfig;
-use crate::rom::{Rom};
+use crate::rom::Rom;
 
 /// UxRom, Mapper 2
 /// https://www.nesdev.org/wiki/UxROM

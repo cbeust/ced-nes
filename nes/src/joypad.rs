@@ -1,5 +1,3 @@
-use tracing::info;
-
 #[derive(Copy, Clone)]
 pub enum Button {
     A, // bit 0
@@ -14,7 +12,7 @@ pub enum Button {
 
 #[derive(Default)]
 pub struct Joypad {
-    strobe: bool,
+    _strobe: bool,
     button_index: u8,
     button_status: u8,
 }
@@ -22,7 +20,7 @@ pub struct Joypad {
 impl Joypad {
     pub fn new() -> Self {
         Joypad {
-            strobe: false,
+            _strobe: false,
             button_index: 0,
             button_status: 0,
         }

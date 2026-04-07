@@ -1,8 +1,8 @@
 use crate::is_set;
-use crate::mappers::mapper::{Mapper};
+use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_config::MapperConfig;
-use crate::rom::{Rom};
 use crate::rom::Mirroring::{ScreenA, ScreenB};
+use crate::rom::Rom;
 
 pub struct MapperAxRom;
 

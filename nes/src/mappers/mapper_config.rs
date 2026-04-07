@@ -1,5 +1,3 @@
-use std::arch::x86_64::_popcnt32;
-use tracing::info;
 use crate::rom::{Mirroring, Rom};
 
 

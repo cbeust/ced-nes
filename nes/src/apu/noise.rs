@@ -1,4 +1,5 @@
 use crate::apu::envelope::Envelope;
+use crate::apu::LENGTH_TABLE;
 
 // Noise period lookup table
 pub const NOISE_PERIOD_TABLE: [u16; 16] = [
@@ -10,17 +11,17 @@ pub const NOISE_PERIOD_TABLE: [u16; 16] = [
 #[derive(Clone, Default)]
 pub struct Noise {
     pub reg_ctrl: u8, // $400c
-    pub reg_period: u8, // $400e
-    pub reg_length: u8, // $400f
+    reg_period: u8, // $400e
+    reg_length: u8, // $400f
 
     shift_reg: u16, // 15 (fifteen) bit shift register
-    pub timer: u16,
+    timer: u16,
     timer_counter: u16,
     pub length_counter: u8,
-    pub envelope: Envelope,
+    envelope: Envelope,
     // Feedback is calculated as the exclusive-OR of bit 0 and one other bit:
     // bit 6 if Mode flag is set, otherwise bit 1.
-    pub mode: bool,
+    mode: bool,
     pub enabled: bool,
 }
 
@@ -29,6 +30,26 @@ impl Noise {
         let mut result = Self::default();
         result.shift_reg = 1;
         result
+    }
+
+    pub fn set(&mut self, address: u16, val: u8) {
+        let a = address & 0x03;
+        match a {
+            0 => { self.reg_ctrl = val; }
+            2 => {
+                self.reg_period = val;
+                self.mode = (val & 0x80) != 0;
+                self.timer = NOISE_PERIOD_TABLE[val as usize & 0x0F];
+            }
+            3 => {
+                self.reg_length = val;
+                if self.enabled {
+                    self.length_counter = LENGTH_TABLE[val as usize >> 3];
+                }
+                self.envelope.set_start(true);
+            }
+            _ => {}
+        }
     }
 
     pub fn clock_envelope(&mut self) {

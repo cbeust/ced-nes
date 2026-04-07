@@ -1,15 +1,12 @@
-use std::fs::File;
-use rolling_file::{BasicRollingFileAppender, RollingConditionBasic, RollingFileAppender};
-use tracing::info;
-use tracing_appender::non_blocking;
-use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::filter::FilterExt;
-use tracing_subscriber::fmt::writer::BoxMakeWriter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use cpu::cpu2::CPU2_DEBUG;
 use crate::constants::*;
 use crate::ppu::{CURRENT_CYCLE, CURRENT_SCANLINE};
+use cpu::cpu2::CPU2_DEBUG;
+use rolling_file::{RollingConditionBasic, RollingFileAppender};
+use std::fs::File;
+use tracing_appender::non_blocking;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGuard> {
     use tracing_subscriber::EnvFilter;
@@ -39,7 +36,7 @@ pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGua
 
             // Format the log message with level and fields
             if DEBUG_MESEN {
-                let h = CURRENT_CYCLE.read().unwrap();
+                let _h = CURRENT_CYCLE.read().unwrap();
                 write!(writer, "{fields_buf}\n")
             } else {
                 write!(writer, "{}:{} - {:03},{:03} - {}\n",

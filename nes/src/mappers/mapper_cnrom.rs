@@ -1,7 +1,7 @@
-use tracing::debug;
-use crate::mappers::mapper::{Mapper};
+use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_config::MapperConfig;
 use crate::rom::Rom;
+use tracing::debug;
 
 pub struct MapperCNRom;
 

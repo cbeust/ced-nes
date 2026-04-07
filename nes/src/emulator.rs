@@ -1,29 +1,27 @@
-use std::collections::HashSet;
-use std::ops::Add;
-use std::sync::{Arc, RwLock};
-use std::time::Instant;
-use enum_dispatch::enum_dispatch;
-use lazy_static::lazy_static;
-use tracing::{debug, info};
-use cpu::config::Config;
-use cpu::cpu2::Cpu2;
-use cpu::cpu::{Cpu};
-use cpu::external_logger::{DefaultLogger, IExternalLogger};
-use cpu::labels::Labels;
-use cpu::memory::Memory;
 use crate::app::SharedState;
 use crate::apu::Apu;
-use crate::Args;
 use crate::constants::{RomInfo, CPU_TYPE_NEW, DEBUG_ASM, DEBUG_MESEN, HEIGHT, WIDTH};
-use crate::rom::Rom;
 use crate::joypad::Joypad;
 use crate::mappers::mapper_base::MapperBase;
 use crate::mesen_logger::{MesenLogger, LOG_CYCLE, LOG_SCANLINE};
 use crate::nes_memory::NesMemory;
 use crate::ppu::{Ppu, PpuResult, CURRENT_CYCLE, CURRENT_SCANLINE};
+use crate::rom::Rom;
+use crate::Args;
+use cpu::config::Config;
+use cpu::cpu::Cpu;
+use cpu::cpu2::Cpu2;
+use cpu::external_logger::{DefaultLogger, IExternalLogger};
+use cpu::labels::Labels;
+use cpu::memory::Memory;
+use lazy_static::lazy_static;
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
+use std::time::Instant;
+use tracing::{debug, info};
 
 pub struct FrameStat {
-    duration_ms: u16,
+    _duration_ms: u16,
 }
 
 pub static mut FRAME: [u8; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT];
@@ -100,22 +98,22 @@ pub struct Emulator {
     // New
     // pub cpu: Cpu2<NesMemory>,
     // pub cpu: Cpu<NesMemory>,
-    pub cpu: CpuType,
+    cpu: CpuType,
     pub(crate) ppu: Arc<RwLock<Ppu>>,
     pub(crate) apu: Arc<RwLock<Apu>>,
-    pub rom: Option<Rom>,
+    pub _rom: Option<Rom>,
     pub config: Config,
     // pub frame: Frame,
     frame_start: Instant,
     // Used to measure and display the FPS
     pub frame_stats: Vec<FrameStat>,
-    frame_stats_last: Instant,
+    _frame_stats_last: Instant,
     // Used to count the FPS to pace it
     pub frame_count: Vec<FrameStat>,
     pub frame_count_last: Instant,
-    fps: u16,
-    joypad: Joypad,
-    shared_state: Arc<RwLock<SharedState>>
+    _fps: u16,
+    _joypad: Joypad,
+    _shared_state: Arc<RwLock<SharedState>>
 }
 
 impl Emulator {
@@ -191,17 +189,17 @@ impl Emulator {
             cpu,
             ppu: ppu2,
             apu: apu2,
-            rom: Some(rom),
+            _rom: Some(rom),
             config,
             // frame: Frame::default(),
             frame_start: Instant::now(),
             frame_stats: Vec::new(),
-            frame_stats_last: Instant::now(),
+            _frame_stats_last: Instant::now(),
             frame_count: Vec::new(),
             frame_count_last: Instant::now(),
-            fps: 0,
-            joypad: Joypad::new(),
-            shared_state,
+            _fps: 0,
+            _joypad: Joypad::new(),
+            _shared_state: shared_state,
         }
     }
 
@@ -261,10 +259,10 @@ impl Emulator {
             }
             if frame_end {
                 self.frame_stats.push(FrameStat {
-                    duration_ms: self.frame_start.elapsed().as_millis() as u16
+                    _duration_ms: self.frame_start.elapsed().as_millis() as u16
                 });
                 self.frame_count.push(FrameStat {
-                    duration_ms: self.frame_start.elapsed().as_millis() as u16
+                    _duration_ms: self.frame_start.elapsed().as_millis() as u16
                 });
                 self.apu.write().unwrap().flush_samples();
             }
@@ -285,7 +283,7 @@ impl Emulator {
         // Old
         // let has_advanced = self.cpu.one_cycle(&mut self.config, &HashSet::new());
         // New
-        let (has_advanced, cycles) = self.cpu.one_cycle(&mut self.config, &HashSet::new());
+        let (has_advanced, _cycles) = self.cpu.one_cycle(&mut self.config, &HashSet::new());
         if has_advanced {
             *LOG_SCANLINE.write().unwrap() = *CURRENT_SCANLINE.read().unwrap();
             *LOG_CYCLE.write().unwrap() = *CURRENT_CYCLE.read().unwrap();
@@ -338,8 +336,8 @@ impl Emulator {
     //     result
     // }
 
-    pub fn set_rom(&mut self, rom: Option<Rom>) {
-        self.rom = rom;
+    pub fn _set_rom(&mut self, rom: Option<Rom>) {
+        self._rom = rom;
     }
 
     fn displayable_character(byte: u8) -> String {

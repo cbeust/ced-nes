@@ -1,18 +1,18 @@
-use tracing::info;
-use crate::mappers::mapper::{Mapper};
+use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper0::Mapper0;
 use crate::mappers::mapper19::Mapper19;
-use crate::mappers::mapper_mmc1::MapperMMC1;
-use crate::mappers::mapper_uxrom::MapperUxROM;
-use crate::mappers::mapper_mmc3::MapperMMC3;
 use crate::mappers::mapper_axrom::MapperAxRom;
 use crate::mappers::mapper_cnrom::MapperCNRom;
 use crate::mappers::mapper_config::MapperConfig;
 use crate::mappers::mapper_gxrom::MapperGxRom;
+use crate::mappers::mapper_mmc1::MapperMMC1;
 use crate::mappers::mapper_mmc2::MapperMMC2;
+use crate::mappers::mapper_mmc3::MapperMMC3;
+use crate::mappers::mapper_uxrom::MapperUxROM;
 use crate::nes_memory::NesMemory;
 use crate::ppu::VRAM_SIZE;
 use crate::rom::{Mirroring, Rom, CHR_ROM_SIZE};
+use tracing::info;
 
 /// enum_dispatch fails here because as soon as there is more than one variant,
 /// the performances tank. So I have to innline all the mappers manually and then
@@ -24,8 +24,8 @@ pub struct MapperBase {
     chr_ram: Vec<u8>,  // 8KB CHR RAM
     prg_rom: Vec<u8>,
     wram: [u8; 0x8000],
-    prg_bank_mask: usize,
-    chr_bank_mask: usize,
+    _prg_bank_mask: usize,
+    _chr_bank_mask: usize,
     // Using these pointers to dispatch memory accesses to either the mapper
     // or the generic MapperBase implementation. Removing branches against the
     // boolean config.is_custom_*** accelerates performances by 3x...
@@ -89,7 +89,8 @@ impl MapperBase {
             config,
             prg_rom: rom.prg_rom.clone(),
             chr_ram: rom.chr_rom.clone(),
-            prg_bank_mask, chr_bank_mask,
+            _prg_bank_mask: prg_bank_mask,
+            _chr_bank_mask: chr_bank_mask,
             read_prg_pointer,
             vram: [0; VRAM_SIZE],
             vram_a: [0; 0x400],
@@ -118,8 +119,8 @@ impl MapperBase {
         } else {
             let t = self.nametable_mirroring(address);
             match t {
-                VramType::Vram_A => { self.vram_a[address & 0x3ff] }
-                VramType::Vram_B => { self.vram_b[address & 0x3ff] }
+                VramType::VramA => { self.vram_a[address & 0x3ff] }
+                VramType::VramB => { self.vram_b[address & 0x3ff] }
                 VramType::Vram => { self.vram[address] }
             }
         }
@@ -131,8 +132,8 @@ impl MapperBase {
         } else {
             let t = self.nametable_mirroring(address);
             match t {
-                VramType::Vram_A => { self.vram_a[address & 0x3ff] = value }
-                VramType::Vram_B => { self.vram_b[address & 0x3ff] = value }
+                VramType::VramA => { self.vram_a[address & 0x3ff] = value }
+                VramType::VramB => { self.vram_b[address & 0x3ff] = value }
                 VramType::Vram => self.vram[address] = value
             }
         };
@@ -215,7 +216,7 @@ impl MapperBase {
 
 #[derive(Debug, PartialEq)]
 pub enum VramType {
-    Vram_A,
-    Vram_B,
+    VramA,
+    VramB,
     Vram,
 }

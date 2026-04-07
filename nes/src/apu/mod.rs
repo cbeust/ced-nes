@@ -3,15 +3,15 @@ mod pulse;
 mod triangle;
 mod noise;
 
+use self::noise::Noise;
+use self::pulse::Pulse;
+use self::triangle::Triangle;
+use self::FrameCounterMode::{Step4, Step5};
+use rodio::source::Source;
+use rodio::{nz, ChannelCount, DeviceSinkBuilder, SampleRate};
 use std::collections::VecDeque;
 use std::num::NonZero;
 use std::sync::{Arc, Mutex};
-use rodio::{nz, ChannelCount, DeviceSinkBuilder, SampleRate};
-use rodio::source::Source;
-use self::FrameCounterMode::{Step4, Step5};
-use self::pulse::Pulse;
-use self::triangle::Triangle;
-use self::noise::{Noise, NOISE_PERIOD_TABLE};
 
 // length counter lookup table
 const LENGTH_TABLE: [u8; 32] = [
@@ -63,7 +63,7 @@ impl Apu {
             pulse2: Pulse::default(),
             triangle: Triangle::default(),
             noise: Noise::new(),
-            frame_counter_mode: FrameCounterMode::Step4,
+            frame_counter_mode: Step4,
             frame_counter: 0,
             cycle_count: 0,
             output_sample: 0.0,
@@ -146,15 +146,7 @@ impl Apu {
         self.clock_frame_counter();
 
         // triangle timer clocks every CPU cycle
-        if self.triangle.timer_counter == 0 {
-            self.triangle.timer_counter = self.triangle.timer;
-            if self.triangle.length_counter > 0 && self.triangle.linear_counter > 0 {
-                // println!("Triangle sequence pos: {}", self.triangle.sequence_pos);
-                self.triangle.sequence_pos = (self.triangle.sequence_pos + 1) & 31;
-            }
-        } else {
-            self.triangle.timer_counter -= 1;
-        }
+        self.triangle.step();
 
         // pulse and noise timers clock every other CPU cycle (APU cycle)
         if self.cycle_count % 2 == 0 {
@@ -215,74 +207,10 @@ impl Apu {
 
     pub fn set(&mut self, addr: u16, val: u8) {
         match addr {
-            //
-            // Pulse 1
-            //
-            0x4000 => {
-                self.pulse1.reg_ctrl = val;
-            }
-            0x4001 => {
-                self.pulse1.sweep_control(val);
-            }
-            0x4002 => {
-                self.pulse1.reg_timer_lo = val;
-                self.pulse1.timer = (self.pulse1.timer & 0x0700) | val as u16;
-            }
-            0x4003 => {
-                self.pulse1.set_timer_high(val);
-            }
-
-            //
-            // Pulse 2
-            //
-            0x4004 => {
-                self.pulse2.reg_ctrl = val;
-            }
-            0x4005 => {
-                self.pulse2.sweep_control(val);
-            }
-            0x4006 => {
-                self.pulse2.reg_timer_lo = val;
-                self.pulse2.timer = (self.pulse2.timer & 0x0700) | val as u16;
-            }
-            0x4007 => {
-                self.pulse2.set_timer_high(val);
-            }
-
-            //
-            // Triangle
-            //
-            0x4008 => {
-                self.triangle.reg_ctrl = val;
-                self.triangle.control_flag = (val & 0x80) != 0;
-            }
-            0x400a => {
-                self.triangle.reg_timer_lo = val;
-                self.triangle.timer = (self.triangle.timer & 0x700) | val as u16;
-                // println!("New timer 400a: {}", self.triangle.timer);
-            }
-            0x400b => {
-                self.triangle.set_timer_high(val);
-            }
-
-            //
-            // Noise
-            //
-            0x400c => {
-                self.noise.reg_ctrl = val;
-            }
-            0x400e => {
-                self.noise.reg_period = val;
-                self.noise.mode = (val & 0x80) != 0;
-                self.noise.timer = NOISE_PERIOD_TABLE[val as usize & 0x0F];
-            }
-            0x400f => {
-                self.noise.reg_length = val;
-                if self.noise.enabled {
-                    self.noise.length_counter = LENGTH_TABLE[val as usize >> 3];
-                }
-                self.noise.envelope.set_start(true);
-            }
+            0x4000..=0x4003 => { self.pulse1.set(addr, val); }
+            0x4004..=0x4007 => { self.pulse2.set(addr, val); }
+            0x4008..=0x400b => { self.triangle.set(addr, val); }
+            0x400c..=0x400f => { self.noise.set(addr, val); }
 
             //
             // Status

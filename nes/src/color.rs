@@ -14,7 +14,7 @@ pub static PALETTE_TUPLES: [(u8,u8,u8); 64] = [
     (0x99, 0xFF, 0xFC), (0xDD, 0xDD, 0xDD), (0x11, 0x11, 0x11), (0x11, 0x11, 0x11)
 ];
 
-pub static PALETTE_U32: [u32; 64] = [
+pub static _PALETTE_U32: [u32; 64] = [
     0x808080, 0x003DA6, 0x0012B0, 0x440096, 0xA1005E,
     0xC70028, 0xBA0600, 0x8C1700, 0x5C2F00, 0x104500,
     0x054A00, 0x00472E, 0x004166, 0x000000, 0x050505,
@@ -30,12 +30,12 @@ pub static PALETTE_U32: [u32; 64] = [
     0x99FFFC, 0xDDDDDD, 0x111111, 0x111111,
 ];
 
-pub fn to_u32(color: (u8,u8,u8)) -> u32 {
+pub fn _to_u32(color: (u8,u8,u8)) -> u32 {
     let (r,g,b) = color;
     (r as u32) << 16 | (g as u32) << 8 | (b as u32)
 }
 
-pub fn to_tuple(color: u32) -> (u8, u8, u8) {
+pub fn _to_tuple(color: u32) -> (u8, u8, u8) {
     (
         ((color & 0xff0000) >> 16) as u8,
         ((color & 0xff00) >> 8) as u8,
