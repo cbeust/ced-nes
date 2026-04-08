@@ -1,13 +1,10 @@
 use crate::apu::envelope::Envelope;
 use crate::apu::LENGTH_TABLE;
 
-// Noise period lookup table
-pub const NOISE_PERIOD_TABLE: [u16; 16] = [
-    4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068
-];
-
-// Noise
-// https://www.nesdev.org/wiki/APU_Noise
+///
+/// Noise
+/// https://www.nesdev.org/wiki/APU_Noise
+///
 #[derive(Clone, Default)]
 pub struct Noise {
     pub reg_ctrl: u8, // $400c
@@ -39,7 +36,7 @@ impl Noise {
             2 => {
                 self.reg_period = val;
                 self.mode = (val & 0x80) != 0;
-                self.timer = NOISE_PERIOD_TABLE[val as usize & 0x0F];
+                self.timer = NOISE_PERIOD_TABLE[(val & 0x0F) as usize];
             }
             3 => {
                 self.reg_length = val;
@@ -57,17 +54,11 @@ impl Noise {
     }
 
     pub fn output(&self) -> u8 {
-        if ! self.enabled || self.length_counter == 0 || (self.shift_reg & 1) != 0 {
-            return 0;
-        }
+        // if !self.enabled || self.length_counter == 0 || (self.shift_reg & 1) != 0 {
+        //     return 0;
+        // }
 
-        if (self.reg_ctrl & 0x10) != 0 {
-            // Variable volume
-            self.reg_ctrl & 0xf
-        } else {
-            // Constant volume
-            self.envelope.volume()
-        }
+        self.envelope.output(self.reg_ctrl)
     }
 
     /// The shift register is 15 bits wide, with bits numbered
@@ -82,7 +73,6 @@ impl Noise {
     pub fn clock_timer(&mut self) {
         if self.timer_counter == 0 {
             self.timer_counter = self.timer;
-            // clock shift register
             let bit = if self.mode { 6 } else { 1 };
             let feedback = (self.shift_reg & 1) ^ ((self.shift_reg >> bit) & 1);
             self.shift_reg >>= 1;
@@ -92,3 +82,9 @@ impl Noise {
         }
     }
 }
+
+// Noise period lookup table
+const NOISE_PERIOD_TABLE: [u16; 16] = [
+    4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068
+];
+

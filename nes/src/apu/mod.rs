@@ -41,6 +41,7 @@ pub struct Apu {
     frame_counter_mode: FrameCounterMode,
     frame_counter: u32,
     cycle_count: u64,
+    sample_accumulator: f32,
     output_sample: f32,
     last_sample: f32,
     frame_irq_inhibit: bool,
@@ -66,6 +67,7 @@ impl Apu {
             frame_counter_mode: Step4,
             frame_counter: 0,
             cycle_count: 0,
+            sample_accumulator: 0.0,
             output_sample: 0.0,
             last_sample: 0.0,
             frame_irq_inhibit: false,
@@ -160,11 +162,13 @@ impl Apu {
         // we don't output every cycle, just sample periodically
         // CPU 1.789773 MHz / 44100 Hz = 40.5844 cycles per sample
         // Using an accumulator to handle the fractional cycle count
-        if self.cycle_count % 40 == 0 {
+        self.sample_accumulator += 1.0;
+        if self.sample_accumulator >= 40.5844 {
+            self.sample_accumulator -= 40.5844;
             let p1 = if self.gui_pulse1_enabled { self.pulse1.output() } else { 0 };
             let p2 = if self.gui_pulse2_enabled { self.pulse2.output() } else { 0 };
             let tri = if self.gui_triangle_enabled { self.triangle.output() } else { 0 };
-            let noise = if self.gui_triangle_enabled { self.noise.output() } else { 0 };
+            let noise = if self.gui_noise_enabled { self.noise.output() } else { 0 };
 
             // Mixing formula from NESdev Wiki
             let pulse_out = if p1 + p2 > 0 {
@@ -183,7 +187,7 @@ impl Apu {
             self.output_sample = pulse_out + tnd_out;
 
             // Scale and center. Max output_sample is around 0.15-0.2.
-            let s = self.output_sample; // (self.output_sample * 2.0) - 0.5;
+            let s = self.output_sample;
             self.last_sample = s;
 
             // Push to local buffer instead of shared buffer immediately

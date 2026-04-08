@@ -1,12 +1,9 @@
 use crate::apu::LENGTH_TABLE;
 
-const TRIANGLE_TABLE: [u8; 32] = [
-    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
-];
-
-// Triangle
-// https://www.nesdev.org/wiki/APU_Triangle
+///
+/// Triangle
+/// https://www.nesdev.org/wiki/APU_Triangle
+///
 #[derive(Default, Clone)]
 pub struct Triangle {
     reg_ctrl: u8,      // $4008
@@ -47,7 +44,7 @@ impl Triangle {
     pub fn step(&mut self) {
         if self.timer_counter == 0 {
             self.timer_counter = self.timer;
-            if self.length_counter > 0 && self.linear_counter > 0 {
+            if self.length_counter > 0 && self.linear_counter > 0 && self.timer >= 2 {
                 // println!("Triangle sequence pos: {}", self.sequence_pos);
                 self.sequence_pos = (self.sequence_pos + 1) & 31;
             }
@@ -68,8 +65,7 @@ impl Triangle {
     }
 
     pub fn output(&self) -> u8 {
-        if ! self.enabled || self.length_counter == 0 || self.linear_counter == 0 { 0 }
-        else { TRIANGLE_TABLE[self.sequence_pos] }
+        TRIANGLE_TABLE[self.sequence_pos]
     }
 
     pub fn set_timer_high(&mut self, val: u8) {
@@ -82,3 +78,9 @@ impl Triangle {
         // println!("New timer 400b: {}", self.triangle.timer);
     }
 }
+
+const TRIANGLE_TABLE: [u8; 32] = [
+    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+];
+

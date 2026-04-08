@@ -25,11 +25,17 @@ impl Envelope {
         }
     }
 
-    pub fn volume(&self) -> u8 {
-        self.volume
-    }
-
     pub fn set_start(&mut self, v: bool) {
         self.start = v;
     }
+
+    /// reg_ctrl controls whether we issue a constant or variable volume
+    pub fn output(&self, reg_ctrl: u8) -> u8 {
+        if reg_ctrl & 0x10 != 0 {
+            reg_ctrl & 0x0F
+        } else {
+            self.volume
+        }
+
+    }   
 }

@@ -1,15 +1,10 @@
 use crate::apu::envelope::Envelope;
 use crate::apu::LENGTH_TABLE;
 
-const DUTY_TABLE: [[u8; 8]; 4] = [
-    [0, 1, 0, 0, 0, 0, 0, 0], // 12.5%
-    [0, 1, 1, 0, 0, 0, 0, 0], // 25%
-    [0, 1, 1, 1, 1, 0, 0, 0], // 50%
-    [1, 0, 0, 1, 1, 1, 1, 1], // 25% negated
-];
-
-// Pulse
-// https://www.nesdev.org/wiki/APU_Pulse
+///
+/// Pulse
+/// https://www.nesdev.org/wiki/APU_Pulse
+///
 #[derive(Default, Clone)]
 pub struct Pulse {
     pub reg_ctrl: u8,      // $4000/$4004 - duty, loop, constant vol, volume
@@ -68,7 +63,7 @@ impl Pulse {
         let mut target;
         if self.sweep_negate {
             target = self.timer - change;
-            if is_pulse1 {
+            if is_pulse1 && target > 0 {
                 target -= 1;
             }
         } else {
@@ -88,19 +83,14 @@ impl Pulse {
     }
 
     pub fn output(&self) -> u8 {
-        if ! self.enabled || self.length_counter == 0 || self.timer < 8 {
+        if ! self.enabled || self.length_counter == 0 || self.timer < 8 || self.timer > 0x7ff {
             return 0;
         }
-        let duty = (self.reg_ctrl >> 6) & 0x03;
-        let duty_out = DUTY_TABLE[duty as usize][self.duty_pos];
-        if duty_out == 0 { return 0; }
+        let duty_index = (self.reg_ctrl >> 6) & 0x03;
+        let duty = DUTY_TABLE[duty_index as usize][self.duty_pos];
 
-        // Constant volume of envelop
-        if self.reg_ctrl & 0x10 != 0 {
-            self.reg_ctrl & 0x0F
-        } else {
-            self.envelope.volume()
-        }
+        if duty == 0 { 0 }
+        else { self.envelope.output(self.reg_ctrl) }
     }
 
     pub fn sweep_control(&mut self, val: u8) {
@@ -122,3 +112,11 @@ impl Pulse {
         self.envelope.set_start(true);
     }
 }
+
+const DUTY_TABLE: [[u8; 8]; 4] = [
+    [0, 1, 0, 0, 0, 0, 0, 0], // 12.5%
+    [0, 1, 1, 0, 0, 0, 0, 0], // 25%
+    [0, 1, 1, 1, 1, 0, 0, 0], // 50%
+    [1, 0, 0, 1, 1, 1, 1, 1], // 25% negated
+];
+
