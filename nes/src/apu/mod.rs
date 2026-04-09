@@ -42,7 +42,6 @@ pub struct Apu {
     frame_counter: u32,
     cycle_count: u64,
     sample_accumulator: f32,
-    output_sample: f32,
     last_sample: f32,
     frame_irq_inhibit: bool,
 
@@ -68,7 +67,6 @@ impl Apu {
             frame_counter: 0,
             cycle_count: 0,
             sample_accumulator: 0.0,
-            output_sample: 0.0,
             last_sample: 0.0,
             frame_irq_inhibit: false,
 
@@ -95,46 +93,52 @@ impl Apu {
     }
 
     fn clock_frame_counter(&mut self) {
-        let mut step = -1;
+        self.frame_counter += 1;
+
+        let mut clock_env = false;
+        let mut clock_len = false;
+
         if matches!(self.frame_counter_mode, Step4) {
-            // 4 step mode
-            if self.frame_counter == 3729 { step = 0; }
-            else if self.frame_counter == 7457 { step = 1; }
-            else if self.frame_counter == 11186 { step = 2; }
-            else if self.frame_counter == 14915 {
-                step = 3;
+            // 4-step mode (60 Hz)
+            if self.frame_counter == 3729 {
+                clock_env = true;
+            } else if self.frame_counter == 7457 {
+                clock_env = true;
+                clock_len = true;
+            } else if self.frame_counter == 11186 {
+                clock_env = true;
+            } else if self.frame_counter == 14915 {
+                clock_env = true;
+                clock_len = true;
                 self.frame_counter = 0;
+                // TODO: Set IRQ flag if not inhibited
             }
         } else {
-            // 5 step mode
-            if self.frame_counter == 3729 { step = 0; }
-            else if self.frame_counter == 7457 { step = 1; }
-            else if self.frame_counter == 11186 { step = 2; }
-            else if self.frame_counter == 14915 { step = 3; }
-            else if self.frame_counter == 18641 {
-                step = 4;
+            // 5-step mode (48 Hz / 192 Hz)
+            if self.frame_counter == 3729 {
+                clock_env = true;
+            } else if self.frame_counter == 7457 {
+                clock_env = true;
+                clock_len = true;
+            } else if self.frame_counter == 11186 {
+                clock_env = true;
+            } else if self.frame_counter == 14915 {
+                // Step 4: nothing
+            } else if self.frame_counter == 18641 {
+                clock_env = true;
+                clock_len = true;
                 self.frame_counter = 0;
             }
         }
 
-        self.frame_counter += 1;
-        if step < 0 { return }
+        if clock_env {
+            self.pulse1.clock_envelope();
+            self.pulse2.clock_envelope();
+            self.noise.clock_envelope();
+            self.triangle.clock_linear_counter();
+        }
 
-        // Clock all channels
-        self.pulse1.clock_envelope();
-        self.pulse2.clock_envelope();
-        self.noise.clock_envelope();
-        self.triangle.clock_linear_counter();
-
-        // length counter and sweep clock on steps 1 and 3 (4-step) or 0,2,4 (5-step)
-        let clock_length =
-            if matches!(self.frame_counter_mode, Step4) {
-                step == 1 || step == 3
-            } else {
-                step == 0 || step == 2 || step == 4
-            };
-
-        if clock_length {
+        if clock_len {
             self.clock_length_counters();
             self.pulse1.clock_sweep(true);
             self.pulse2.clock_sweep(false);
@@ -145,13 +149,14 @@ impl Apu {
         self.cycle_count += 1;
 
         // frame counter runs every cycle
-        self.clock_frame_counter();
+        // self.clock_frame_counter();
 
         // triangle timer clocks every CPU cycle
         self.triangle.step();
 
         // pulse and noise timers clock every other CPU cycle (APU cycle)
         if self.cycle_count % 2 == 0 {
+            self.clock_frame_counter();
             self.pulse1.clock_timer();
             self.pulse2.clock_timer();
             self.noise.clock_timer();
@@ -184,10 +189,7 @@ impl Apu {
                 0.0
             };
 
-            self.output_sample = pulse_out + tnd_out;
-
-            // Scale and center. Max output_sample is around 0.15-0.2.
-            let s = self.output_sample;
+            let s = (pulse_out + tnd_out) / 2.0;
             self.last_sample = s;
 
             // Push to local buffer instead of shared buffer immediately
@@ -203,9 +205,6 @@ impl Apu {
             return;
         }
 
-        // println!("Sending {} samples", self.local_buffer.len());
-        // Limit buffer size to 2048 samples (~90ms) to avoid massive latency/memory use,
-        // there should only be 730 samples per frame
         self.buffer.lock().unwrap().extend(self.local_buffer.drain(..));
     }
 
@@ -220,15 +219,10 @@ impl Apu {
             // Status
             //
             0x4015 => {
-                self.pulse1.enabled = (val & 0x01) != 0;
-                self.pulse2.enabled = (val & 0x02) != 0;
-                self.triangle.enabled = (val & 0x04) != 0;
-                self.noise.enabled = (val & 0x08) != 0;
-
-                if ! self.pulse1.enabled { self.pulse1.length_counter = 0; }
-                if ! self.pulse2.enabled { self.pulse2.length_counter = 0; }
-                if ! self.triangle.enabled { self.triangle.length_counter = 0;}
-                if ! self.noise.enabled { self.noise.length_counter = 0; }
+                self.pulse1.set_enabled((val & 0x01) != 0);
+                self.pulse2.set_enabled((val & 0x02) != 0);
+                self.triangle.set_enabled((val & 0x04) != 0);
+                self.noise.set_enabled((val & 0x08) != 0);
             }
 
             // Frame counter
@@ -236,12 +230,15 @@ impl Apu {
                 self.frame_counter_mode = if (val & 0x80) == 0 { Step4 } else { Step5 };
                 self.frame_irq_inhibit = (val & 0x40) != 0;
                 self.frame_counter = 0;
-                // If Step5, clock everything immediately
+
+                // If Step5, the units are clocked immediately.
+                // In Step4, it just resets the counter (clocks happen at next steps).
                 if matches!(self.frame_counter_mode, Step5) {
                     self.pulse1.clock_envelope();
                     self.pulse2.clock_envelope();
                     self.noise.clock_envelope();
                     self.triangle.clock_linear_counter();
+
                     self.clock_length_counters();
                     self.pulse1.clock_sweep(true);
                     self.pulse2.clock_sweep(false);
@@ -252,24 +249,23 @@ impl Apu {
     }
 
     pub fn get(&self, addr: u16) -> u8 {
-        if addr == 0x4015 {
-            let mut status = 0;
-            if self.pulse1.length_counter > 0 {
-                status |= 0x01;
+        let mut result = 0;
+
+        match addr {
+            0x4015 => {
+                // $4015 read	IF-D NT21
+                // 	DMC interrupt (I), frame interrupt (F), DMC active (D), length counter > 0 (N/T/2/1)
+                if self.pulse1.length_counter > 0 { result |= 0x01; }
+                if self.pulse2.length_counter > 0 { result |= 0x02; }
+                if self.triangle.length_counter > 0 { result |= 0x04; }
+                if self.noise.length_counter > 0 { result |= 0x08; }
+                // TODO: DMC interrupt, Frame interrupt, DMC active
+
             }
-            if self.pulse2.length_counter > 0 {
-                status |= 0x02;
-            }
-            if self.triangle.length_counter > 0 {
-                status |= 0x04;
-            }
-            if self.noise.length_counter > 0 {
-                status |= 0x08;
-            }
-            return status;
+            _ => {}
         }
 
-        0
+        result
     }
 
     pub fn set_pulse1_enabled(&mut self, enabled: bool) {

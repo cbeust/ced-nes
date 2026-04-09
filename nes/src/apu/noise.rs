@@ -19,7 +19,7 @@ pub struct Noise {
     // Feedback is calculated as the exclusive-OR of bit 0 and one other bit:
     // bit 6 if Mode flag is set, otherwise bit 1.
     mode: bool,
-    pub enabled: bool,
+    enabled: bool,
 }
 
 impl Noise {
@@ -54,9 +54,9 @@ impl Noise {
     }
 
     pub fn output(&self) -> u8 {
-        // if !self.enabled || self.length_counter == 0 || (self.shift_reg & 1) != 0 {
-        //     return 0;
-        // }
+        if !self.enabled || self.length_counter == 0 || (self.shift_reg & 1) != 0 {
+            return 0;
+        }
 
         self.envelope.output(self.reg_ctrl)
     }
@@ -80,6 +80,11 @@ impl Noise {
         } else {
             self.timer_counter -= 1;
         }
+    }
+
+    pub fn set_enabled(&mut self, v: bool) {
+        self.enabled = v;
+        if ! v { self.length_counter = 0; }
     }
 }
 

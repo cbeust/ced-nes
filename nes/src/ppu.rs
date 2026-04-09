@@ -524,16 +524,15 @@ impl Ppu {
     pub fn update_beam(&mut self, rendering_enabled: bool) {
         // Increment cycle/scanline
         self.cycle += 1;
-        let _max = CYCLES;
-        if self.cycle == CYCLES - 1 {
-            self.odd_frame = ! self.odd_frame;
+        if self.cycle == CYCLES {
             self.cycle = 0;
             self.scanline += 1;
             if self.scanline == SCANLINES {
                 self.scanline = 0;
                 self.sprite_0_hit = false;
+                self.odd_frame = ! self.odd_frame;
                 // Skip dot 0 on odd frames
-                if ! self.odd_frame && rendering_enabled { self.cycle = 1 };
+                if self.odd_frame && rendering_enabled { self.cycle = 1 };
             }
         }
     }

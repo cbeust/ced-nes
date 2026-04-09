@@ -27,7 +27,7 @@ pub struct Pulse {
     sweep_period: u8,
     sweep_shift: u8,
 
-    pub enabled: bool,
+    enabled: bool,
 }
 
 impl Pulse {
@@ -69,9 +69,9 @@ impl Pulse {
         } else {
             target = self.timer + change;
         }
-        let _mute = target > 0x7ff || self.timer == 8;
+        let mute = target > 0x7ff || self.timer < 8;
 
-        if self.sweep_counter == 0 && self.sweep_enabled && ! _mute && self.sweep_shift > 0 {
+        if self.sweep_counter == 0 && self.sweep_enabled && ! mute && self.sweep_shift > 0 {
             self.timer = target;
         }
         if self.sweep_counter == 0 || self.sweep_reload {
@@ -110,6 +110,11 @@ impl Pulse {
         }
         self.duty_pos = 0;
         self.envelope.set_start(true);
+    }
+
+    pub fn set_enabled(&mut self, v: bool) {
+        self.enabled = v;
+        if ! v { self.length_counter = 0; }
     }
 }
 

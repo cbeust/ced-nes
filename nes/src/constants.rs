@@ -28,7 +28,7 @@ pub const SCALE_Y: f32 = 2.0;
 
 // pub const ALL_MAPPERS: [u8; 1] = [9];
 pub const ALL_MAPPERS: [u8; 9] = [0, 1, 2, 3, 4, 7, 9, 19, 66];
-pub const DEMO_DELAY_SECONDS: u64 = 5;
+pub const DEMO_DELAY_SECONDS: u64 = 8;
 
 use once_cell::sync::Lazy;
 use std::convert::Into;

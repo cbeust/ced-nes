@@ -18,7 +18,7 @@ pub struct Triangle {
     linear_reload: bool,
     pub control_flag: bool,
 
-    pub enabled: bool,
+    enabled: bool,
 }
 
 impl Triangle {
@@ -76,6 +76,11 @@ impl Triangle {
         }
         self.linear_reload = true;
         // println!("New timer 400b: {}", self.triangle.timer);
+    }
+
+    pub fn set_enabled(&mut self, v: bool) {
+        self.enabled = v;
+        if ! v { self.length_counter = 0; }
     }
 }
 

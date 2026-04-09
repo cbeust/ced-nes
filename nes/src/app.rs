@@ -7,7 +7,6 @@ use crate::Args;
 use iced::alignment::Horizontal;
 use iced::keyboard::Key;
 use iced::mouse::Cursor;
-use iced::widget::button::danger;
 use iced::widget::canvas::{Cache, Fill, Geometry, Program};
 use iced::widget::scrollable::Id;
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
@@ -187,30 +186,23 @@ impl Program<AppMessage> for App {
             // frame.fill(&bg, fill);
 
             // frame.scale(5.0);
-            let mut _offset = 0;
             let scale_x = SCALE_X;
-            let scale_y = SCALE_Y * 1.0;
+            let scale_y = SCALE_Y;
             unsafe {
-                // let frame = &raw const FRAME;
                 let f = &raw const FRAME;
                 for (index, color) in (*f).iter().enumerate() {
                     let rgb = PALETTE_TUPLES[*color as usize];
                     let fill = Fill::from(Color::from_rgb8(rgb.0, rgb.1, rgb.2));
-                    let x = index % 256;
-                    let y = index / 256;
-                    let xx = _offset + scale_x as usize * x;
-                    let yy = scale_y as usize * y;
-                    // if x < 8 * scale as usize && y < 8 * scale as usize {
-                    //     info!("Drawing {x},{y} = {},{},{}", rgb.0, rgb.1, rgb.2);
-                    // }
+                    let x = (index % 256) as f32;
+                    let y = (index / 256) as f32;
+                    let xx = scale_x * x;
+                    let yy = scale_y * y;
+
                     let size = Size::new(scale_x, scale_y);
-                    let top_left = Point::new(xx as f32, yy as f32);
+                    let top_left = Point::new(xx, yy);
                     frame.fill_rectangle(top_left, size, fill);
-                    // let path = Path::rectangle(top_left, size);
-                    // frame.fill(&path, fill);
                 }
             }
-            _offset += 8 * scale_x as usize;
         });
 
         result.push(geometry);
@@ -303,11 +295,8 @@ impl App {
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::Debug);
             }
             RebootRandom => {
-                let random = rand::thread_rng().gen_range(0..self.roms.len());
-                self.selected_rom_index = Some(random);
-                let index = (self.selected_rom_index.unwrap() + 1) % self.roms.len();
-                // self.selected_rom_index = Some(index);
-                info!("Selected ROM {}/{}", index, self.roms.len());
+                let index = rand::thread_rng().gen_range(0..self.roms.len());
+                info!("Selected random ROM index {}/{}", index, self.roms.len());
                 return self.update(RomSelected(index)).chain(self.update(Reboot));
             }
             FilterTextChanged(text) => {
@@ -381,7 +370,7 @@ impl App {
         
         let info_content = row![
             text(name)
-                .size(18)
+                .size(14)
                 .style(|_theme| text::Style { color: Some(Color::from_rgb(1.0, 1.0, 1.0)) })
                 .width(Length::Fill),
             text(mapper_number)
@@ -453,7 +442,12 @@ impl App {
         let filter_input = text_input("Filter ROMs...", &self.filter_text)
             .on_input(AppMessage::FilterTextChanged)
             .padding(10)
-            .size(16);
+            .size(16)
+            .style(|theme, status| {
+                let mut style = text_input::default(theme, status);
+                style.border.radius = 10.0.into();
+                style
+            });
 
         column![
             self.rom_info_box(),
@@ -471,16 +465,33 @@ impl App {
 
         let buttons = container(Column::new()
             .spacing(10)
-            .push(m_button("Reboot", AppMessage::Reboot).style(danger))
-            .push(m_button("Debug", AppMessage::Debug).style(danger))
-            .push(checkbox("Triangle", self.triangle_enabled).on_toggle(AppMessage::TriangleToggled))
-            .push(checkbox("Pulse1", self.pulse1_enabled).on_toggle(AppMessage::Pulse1Toggled))
-            .push(checkbox("Pulse2", self.pulse2_enabled).on_toggle(AppMessage::Pulse2Toggled))
-            .push(checkbox("Noise", self.noise_enabled).on_toggle(AppMessage::NoiseToggled))
+            .width(Length::Fixed(150.0))
+            .push(m_button("Reboot", AppMessage::Reboot, None))
+            .push(m_button("Random", AppMessage::RebootRandom, None))
+            .push(m_button("Debug", AppMessage::Debug, Some(Color::from_rgb(0.2, 0.2, 0.8))))
+            .push(container(Column::new()
+                .spacing(10)
+                .push(checkbox("Triangle", self.triangle_enabled).on_toggle(AppMessage::TriangleToggled))
+                .push(checkbox("Pulse1", self.pulse1_enabled).on_toggle(AppMessage::Pulse1Toggled))
+                .push(checkbox("Pulse2", self.pulse2_enabled).on_toggle(AppMessage::Pulse2Toggled))
+                .push(checkbox("Noise", self.noise_enabled).on_toggle(AppMessage::NoiseToggled))
+            )
+            .padding(10)
+            .width(Length::Fill)
+            .style(|_theme| {
+                container::Style {
+                    border: Border {
+                        color: Color::BLACK,
+                        width: 1.0,
+                        radius: 5.0.into(),
+                    },
+                    ..Default::default()
+                }
+            }))
         )
             .style(|_theme| {
                 container::Style {
-                    background: Some(Color::from_rgb(0.6, 0.6, 0.6).into()),
+                    background: Some(Color::from_rgb(0.2, 0.2, 0.2).into()),
                     ..Default::default()
                 }
             })
@@ -491,7 +502,7 @@ impl App {
             .spacing(10)
             .push(canvas)
             .push(buttons)
-            .push(self.rom_panel())
+            .push(container(self.rom_panel()).width(Length::Fill))
             ;
 
         let mut column= Column::new();
@@ -499,6 +510,7 @@ impl App {
         column = column.push(row);
 
         container(column)
+            .padding(10)
             .style(|_theme| {
                 container::Style {
                     background: Some(Color::from_rgb(0.2, 0.2, 0.2).into()),
@@ -639,27 +651,35 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
 }
 
 /// A bigger and round button
-pub fn m_button(label: &str, message: AppMessage) -> widget::Button<'_, AppMessage> {
-    let b = button(
+pub fn m_button(label: &str, message: AppMessage, color: Option<Color>) -> widget::Button<'_, AppMessage> {
+    button(
         text(label)
             .align_x(Horizontal::Center)
             .size(20.0)
-            .width(Length::Fixed(75.0)))
-        // TODO: restore the green/yellow buttons
-        // .style(iced::theme::Button::Custom(Box::new(MyButtonStyle)))
-        .on_press(message);
+            .width(Length::Fixed(150.0)))
+        .on_press(message)
+        .style(move |_theme, status| {
+            let base_color = color.unwrap_or(Color::from_rgb(0.8, 0.2, 0.2));
+            let hover_color = Color::from_rgb(
+                (base_color.r + 0.1).min(1.0),
+                (base_color.g + 0.1).min(1.0),
+                (base_color.b + 0.1).min(1.0),
+            );
 
-    let mut _border = Border::default();
-    _border.width = 3.0;
-    _border.color = Color::WHITE;
-    b
-    // .padding(10.0)
-    // .style(
-    //     container::Appearance {
-    //         text_color: Some(BUTTON_TEXT),
-    //         // background: Some(iced::Background::Color(Color::from_rgb8(0.8, 0.0, 0.0))),
-    //         border,
-    //         ..Default::default()
-    //     }
-    // )
+            let background = match status {
+                button::Status::Hovered | button::Status::Pressed => hover_color,
+                _ => base_color,
+            };
+
+            button::Style {
+                background: Some(background.into()),
+                text_color: Color::WHITE,
+                border: Border {
+                    color: Color::BLACK,
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                ..Default::default()
+            }
+        })
 }
