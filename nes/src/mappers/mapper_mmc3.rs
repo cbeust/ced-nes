@@ -4,8 +4,8 @@ use crate::rom::{Mirroring, Rom};
 use std::path::PathBuf;
 use tracing::{debug};
 
-/// CNRom, Mapper 2
-/// https://www.nesdev.org/wiki/CNROM
+/// MMC3 (#4)
+/// https://www.nesdev.org/wiki/MMC3
 pub struct MapperMMC3 {
     chr_mode: u8,
     prg_mode: u8,
