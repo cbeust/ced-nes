@@ -260,7 +260,7 @@ impl NesMemory{
 
     fn is_register(address: u16) -> bool {
         match address {
-            0x4000..=0x400f | 0x4014..=0x4017 => {
+            0x4000..=0x4013 | 0x4014..=0x4017 => {
                 true
             }
             0x2000..=0x2008 => {
@@ -378,7 +378,10 @@ impl NesMemory{
                     debug!(target: "oam", "Writing PPU $4014={value:02X}, \
                      copied 256 bytes from cpu[{:04X}] to OAM", address + offset as u16);
                 }
-                0x4000..=0x400f | 0x4015 | 0x4017 => {
+                0x4000..=0x4013 => {
+                    self.apu.write().unwrap().set(address, value);
+                }
+                0x4015 | 0x4017 => {
                     self.apu.write().unwrap().set(address, value);
                 }
                 // Joypad

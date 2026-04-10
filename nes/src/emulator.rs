@@ -113,7 +113,7 @@ pub struct Emulator {
     pub frame_count_last: Instant,
     _fps: u16,
     _joypad: Joypad,
-    _shared_state: Arc<RwLock<SharedState>>
+    _shared_state: Arc<RwLock<SharedState>>,
 }
 
 impl Emulator {
@@ -275,7 +275,7 @@ impl Emulator {
         //
         // Tick the APU once
         //
-        self.apu.write().unwrap().step();
+        self.apu.write().unwrap().step(self.cpu.memory());
 
         //
         // Tick the CPU once

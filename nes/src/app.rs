@@ -40,6 +40,7 @@ pub struct App {
     pulse1_enabled: bool,
     pulse2_enabled: bool,
     noise_enabled: bool,
+    dmc_enabled: bool,
 }
 
 pub struct SharedState {
@@ -84,6 +85,7 @@ impl App {
             pulse1_enabled: true,
             pulse2_enabled: true,
             noise_enabled: true,
+            dmc_enabled: true,
         }
     }
 
@@ -149,6 +151,7 @@ pub enum AppMessage {
     Pulse1Toggled(bool),
     Pulse2Toggled(bool),
     NoiseToggled(bool),
+    DmcToggled(bool),
 }
 
 #[derive(Copy, Clone)]
@@ -164,6 +167,7 @@ pub enum ToEmulatorMessage {
     SoundPulse2(bool),
     SoundTriangle(bool),
     SoundNoise(bool),
+    SoundDmc(bool),
     Debug,
 }
 
@@ -317,6 +321,10 @@ impl App {
             NoiseToggled(enabled) => {
                 self.noise_enabled = enabled;
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundNoise(enabled));
+            }
+            DmcToggled(enabled) => {
+                self.dmc_enabled = enabled;
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundDmc(enabled));
             }
         }
 
@@ -475,6 +483,7 @@ impl App {
                 .push(checkbox("Pulse1", self.pulse1_enabled).on_toggle(AppMessage::Pulse1Toggled))
                 .push(checkbox("Pulse2", self.pulse2_enabled).on_toggle(AppMessage::Pulse2Toggled))
                 .push(checkbox("Noise", self.noise_enabled).on_toggle(AppMessage::NoiseToggled))
+                .push(checkbox("DMC", self.dmc_enabled).on_toggle(AppMessage::DmcToggled))
             )
             .padding(10)
             .width(Length::Fill)
@@ -499,10 +508,12 @@ impl App {
             .height(Shrink);
 
         let row = Row::new()
-            .spacing(10)
             .push(canvas)
-            .push(buttons)
-            .push(container(self.rom_panel()).width(Length::Fill))
+            .push(container(Row::new()
+                .spacing(10)
+                .push(buttons)
+                .push(container(self.rom_panel()).width(Length::Fill))
+            ).padding(10).height(Length::Fixed(HEIGHT as f32 * SCALE_Y)).align_y(alignment::Vertical::Top))
             ;
 
         let mut column= Column::new();
@@ -510,7 +521,6 @@ impl App {
         column = column.push(row);
 
         container(column)
-            .padding(10)
             .style(|_theme| {
                 container::Style {
                     background: Some(Color::from_rgb(0.2, 0.2, 0.2).into()),
@@ -639,6 +649,9 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
                         }
                         ToEmulatorMessage::SoundNoise(enabled) => {
                             emulator.apu.write().unwrap().set_noise_enabled(enabled);
+                        }
+                        ToEmulatorMessage::SoundDmc(enabled) => {
+                            emulator.apu.write().unwrap().set_dmc_enabled(enabled);
                         }
                     }
                 }

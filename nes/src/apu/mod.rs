@@ -2,6 +2,7 @@ mod envelope;
 mod pulse;
 mod triangle;
 mod noise;
+mod dmc;
 
 use self::noise::Noise;
 use self::pulse::Pulse;
@@ -12,6 +13,8 @@ use rodio::{nz, ChannelCount, DeviceSinkBuilder, SampleRate};
 use std::collections::VecDeque;
 use std::num::NonZero;
 use std::sync::{Arc, Mutex};
+use crate::apu::dmc::Dmc;
+use crate::nes_memory::NesMemory;
 
 // length counter lookup table
 const LENGTH_TABLE: [u8; 32] = [
@@ -37,6 +40,8 @@ pub struct Apu {
     pulse2: Pulse,
     triangle: Triangle,
     noise: Noise,
+    dmc: Dmc,
+
     // frame counter
     frame_counter_mode: FrameCounterMode,
     frame_counter: u32,
@@ -49,6 +54,7 @@ pub struct Apu {
     gui_pulse2_enabled: bool,
     gui_triangle_enabled: bool,
     gui_noise_enabled: bool,
+    gui_dmc_enabled: bool,
 }
 
 impl Apu {
@@ -63,6 +69,8 @@ impl Apu {
             pulse2: Pulse::default(),
             triangle: Triangle::default(),
             noise: Noise::new(),
+            dmc: Dmc::default(),
+
             frame_counter_mode: Step4,
             frame_counter: 0,
             cycle_count: 0,
@@ -74,6 +82,7 @@ impl Apu {
             gui_pulse2_enabled: true,
             gui_triangle_enabled: true,
             gui_noise_enabled: true,
+            gui_dmc_enabled: true,
         }
     }
 
@@ -145,7 +154,7 @@ impl Apu {
         }
     }
 
-    pub fn step(&mut self) {
+    pub fn step(&mut self, memory: &mut NesMemory) {
         self.cycle_count += 1;
 
         // frame counter runs every cycle
@@ -153,6 +162,8 @@ impl Apu {
 
         // triangle timer clocks every CPU cycle
         self.triangle.step();
+        // The DMC will actually not always step, depends on its rate
+        self.dmc.step(memory);
 
         // pulse and noise timers clock every other CPU cycle (APU cycle)
         if self.cycle_count % 2 == 0 {
@@ -174,6 +185,7 @@ impl Apu {
             let p2 = if self.gui_pulse2_enabled { self.pulse2.output() } else { 0 };
             let tri = if self.gui_triangle_enabled { self.triangle.output() } else { 0 };
             let noise = if self.gui_noise_enabled { self.noise.output() } else { 0 };
+            let dmc = if self.gui_dmc_enabled { self.dmc.output() } else { 0 };
 
             // Mixing formula from NESdev Wiki
             let pulse_out = if p1 + p2 > 0 {
@@ -182,7 +194,7 @@ impl Apu {
                 0.0
             };
 
-            let tnd_denom = tri as f32 / 8227.0 + noise as f32 / 12241.0; // + dmc / 22638.0
+            let tnd_denom = tri as f32 / 8227.0 + noise as f32 / 12241.0 + dmc as f32 / 22638.0;
             let tnd_out = if tnd_denom > 0.0 {
                 159.79 / ((1.0 / tnd_denom) + 100.0)
             } else {
@@ -214,6 +226,7 @@ impl Apu {
             0x4004..=0x4007 => { self.pulse2.set(addr, val); }
             0x4008..=0x400b => { self.triangle.set(addr, val); }
             0x400c..=0x400f => { self.noise.set(addr, val); }
+            0x4010..=0x4013 => { self.dmc.set(addr, val); }
 
             //
             // Status
@@ -223,6 +236,7 @@ impl Apu {
                 self.pulse2.set_enabled((val & 0x02) != 0);
                 self.triangle.set_enabled((val & 0x04) != 0);
                 self.noise.set_enabled((val & 0x08) != 0);
+                self.dmc.set_enabled((val & 0x10) != 0);
             }
 
             // Frame counter
@@ -259,8 +273,8 @@ impl Apu {
                 if self.pulse2.length_counter > 0 { result |= 0x02; }
                 if self.triangle.length_counter > 0 { result |= 0x04; }
                 if self.noise.length_counter > 0 { result |= 0x08; }
-                // TODO: DMC interrupt, Frame interrupt, DMC active
-
+                if self.dmc.is_active() { result |= 0x10; }
+                if self.dmc.irq_flag { result |= 0x80; }
             }
             _ => {}
         }
@@ -284,6 +298,9 @@ impl Apu {
         self.gui_noise_enabled = enabled;
     }
 
+    pub fn set_dmc_enabled(&mut self, enabled: bool) {
+        self.gui_dmc_enabled = enabled;
+    }
 }
 
 //
