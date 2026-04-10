@@ -8,10 +8,10 @@ const DEBUG: bool = false;
 pub const DEBUG_ASM: bool = DEBUG;
 pub const CPU_TYPE_NEW: bool = true;
 pub const _COMPARE_LOGS: bool = true;
-pub const DEBUG_MESEN: bool = true;
+pub const DEBUG_MESEN: bool = false;
 pub const LOG_TO_FILE: bool = DEBUG;
 pub const USE_ICED: bool = true;
-pub const SELECTED_ROM: usize = 18;
+pub const SELECTED_ROM: usize = 400;
 
 // Logging
 pub const IR: bool = false;
