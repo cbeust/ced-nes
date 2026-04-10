@@ -1,4 +1,3 @@
-use tracing::info;
 use cpu::memory::Memory;
 use crate::nes_memory::NesMemory;
 
@@ -12,11 +11,11 @@ pub struct Dmc {
     pub irq_enabled: bool,
     pub loop_enabled: bool,
     pub rate_index: usize,
-    pub timer: u16,
-    pub current_timer: u16,
+    pub rate: u16,
+    pub current_rate: u16,
 
     // $4011
-    pub output_level: u8, // 7-bit
+    pub output: u8, // 7-bit
 
     // $4012
     pub sample_address: u16,
@@ -28,6 +27,7 @@ pub struct Dmc {
     pub current_address: u16,
     pub current_length: u16,
 
+    /// The current sample being shifted
     pub sample_buffer: Option<u8>,
     pub shift_register: u8,
     pub bits_remaining: u8, // 0-8
@@ -47,12 +47,12 @@ impl Dmc {
                 }
                 self.loop_enabled = (val & 0x40) != 0;
                 self.rate_index = (val & 0x0F) as usize;
-                self.timer = RATES[self.rate_index];
+                self.rate = RATES[self.rate_index];
                 // Note: The timer is NOT reset immediately by $4010
             }
             1 => {
                 // $4011 - -DDD.DDDD
-                self.output_level = val & 0x7F;
+                self.output = val & 0x7F;
             }
             2 => {
                 // $4012 - AAAA.AAAA
@@ -80,7 +80,10 @@ impl Dmc {
 
     fn fill_sample_buffer(&mut self, memory: &mut NesMemory) {
         if self.sample_buffer.is_none() && self.current_length > 0 {
-            // TODO: CPU should stall for 4 cycles
+            // TODO: CPU should stall for 4, 3, or 2 cycles
+            // From https://www.nesdev.org/wiki/DMA:
+            // DMC DMA halts the CPU, performs a dummy cycle and an optional alignment cycle,
+            // and then gets once, taking 3 or 4 cycles.
             self.sample_buffer = Some(memory.get(self.current_address));
 
             if self.current_address == 0xFFFF {
@@ -106,21 +109,21 @@ impl Dmc {
         self.fill_sample_buffer(memory);
 
         // 2. Timer
-        if self.current_timer > 0 {
-            self.current_timer -= 1;
+        if self.current_rate > 0 {
+            self.current_rate -= 1;
         } else {
-            self.current_timer = self.timer;
+            self.current_rate = self.rate;
 
             // 3. Output Unit
             if !self.silence_flag {
                 let bit = self.shift_register & 0x01;
                 if bit == 1 {
-                    if self.output_level <= 125 {
-                        self.output_level += 2;
+                    if self.output <= 125 {
+                        self.output += 2;
                     }
                 } else {
-                    if self.output_level >= 2 {
-                        self.output_level -= 2;
+                    if self.output >= 2 {
+                        self.output -= 2;
                     }
                 }
             }
@@ -143,7 +146,7 @@ impl Dmc {
     }
 
     pub fn output(&self) -> u8 {
-        self.output_level
+        self.output
     }
 
     pub fn is_active(&self) -> bool {
