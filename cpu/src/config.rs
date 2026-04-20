@@ -20,6 +20,7 @@ impl WatchedFileMsg {
 pub enum System {
     Unknown,
     Apple2,
+    Nes,
 }
 
 #[derive(Clone, Debug)]

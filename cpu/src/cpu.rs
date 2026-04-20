@@ -63,7 +63,7 @@ pub static BREAKPOINT: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));
 
 impl StatusFlags {
     pub fn new() -> Self {
-        Self { _value: 0x30 /* reserved to true by default */ }
+        Self { _value: 0x24 }
     }
 
     pub fn new_with(value: u8) -> Self {
@@ -101,7 +101,7 @@ impl StatusFlags {
     pub fn c(&self) -> bool { self.get_bit(0) }
     pub fn set_c(&mut self, f: bool) { self.set_bit(f, 0) }
 
-    fn set_nz_flags(&mut self, reg: u8) {
+    pub(crate) fn set_nz_flags(&mut self, reg: u8) {
         self.set_z(reg == 0);
         self.set_n(reg & 0x80 != 0);
     }
@@ -783,7 +783,7 @@ impl <T: Memory> Cpu<T> {
                 self.memory.set(address, self.y);
                 self.last_write = Some((address, self.y));
             },
-            TRB_ABS_65C02 | TRB_ZP_65C02 if self.is_65c02 => {
+            TRB_ABS_65C02 | NOP_1C_ABS_X if self.is_65c02 => {
                 (resolved_address, resolved_value) = self.tsb_or_rsb(pc, addressing_type, false);
                 resolved_read = false;
             }
@@ -1030,7 +1030,7 @@ impl <T: Memory> Cpu<T> {
                 self.a = self.a & self.memory.get(pc.wrapping_add(1));
                 self.a = self.lsr(self.a);
             }
-            ANC_IMM | ANC2_IMM => {
+            ANC_IMM | ANC2_ABS_Y => {
                 self.a = self.a & self.memory.get(pc.wrapping_add(1));
                 self.p.set_nz_flags(self.a);
                 self.p.set_c((self.a & (1 << 7)) != 0);

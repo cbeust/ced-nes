@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::process::exit;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
-use crate::config::Config;
+use crate::config::{Config, System};
 use crate::constants;
 use crate::constants::*;
 use crate::cpu::{StatusFlags, LOG_ASYNC};
@@ -12,7 +12,6 @@ use crate::memory::Memory;
 use crate::messages::LogMsg;
 
 pub const CPU2_DEBUG: bool = false;
-pub const DEBUG2_ASM: bool = false;
 
 const STACK_ADDRESS: u16 = 0x100;
 
@@ -87,6 +86,7 @@ pub struct Cpu2<T: Memory> {
     pending_interrupt: Option<(u16, u16)>,
     pc_was_changed: bool,
     pub log_file: LogFile,
+    system: System,
 }
 
 impl<T: Memory> Cpu2<T> {
@@ -126,7 +126,7 @@ impl<T: Memory> Cpu2<T> {
             p: StatusFlags::new(),
 
             current_cycle: 1,
-            cycles: 8,
+            cycles: 7,
             no_increment: false,
             low_byte: 0,
             pointer: 0,
@@ -139,15 +139,16 @@ impl<T: Memory> Cpu2<T> {
             log_info: LogInfo::default(),
             instruction_cycles: 0,
             pc_was_changed: false,
+            system: System::Nes,
         }
     }
 
-    pub fn one_cycle(&mut self, _config: &mut Config, _breakpoints: &HashSet<u16>)
+    pub fn one_cycle(&mut self, config: &mut Config, _breakpoints: &HashSet<u16>)
         -> (bool, u8)
     {
-        let mut result = (self.finished, self.tick());
+        let mut result = (self.finished, self.tick(config));
         while result.1 == 0 {
-            result = (self.finished, self.tick());
+            result = (self.finished, self.tick(config));
         }
         // println!("CPU TICK");
         // info!(target: "asm", "CPU TICK info");
@@ -155,10 +156,10 @@ impl<T: Memory> Cpu2<T> {
         result
     }
 
-    pub fn run_one_instruction(&mut self) -> u8 {
+    pub fn run_one_instruction(&mut self, config: &Config) -> u8 {
         let mut result = 0;
         loop {
-            self.tick();
+            self.tick(config);
             if ! self.no_increment { result += 1; }
             if self.finished {
                 break;
@@ -168,7 +169,7 @@ impl<T: Memory> Cpu2<T> {
     }
 
     /// Return the number of cycles executed
-    pub fn tick(&mut self) -> u8 {
+    pub fn tick(&mut self, config: &Config) -> u8 {
         let mut result: u8 = 1;
         use constants::*;
         // Save the registers for logging
@@ -183,6 +184,10 @@ impl<T: Memory> Cpu2<T> {
             self.instruction_cycles = 0;
             self.pc_was_changed = false;
             self.current_opcode = self.memory.get(self.pc());
+            // if self.current_opcode == 0 {
+            //     println!("BUG BRK");
+            //     let op = self.memory.get(self.pc());
+            // }
             self.log_info = LogInfo {
                 a: self.a,
                 x: self.x,
@@ -221,7 +226,7 @@ impl<T: Memory> Cpu2<T> {
                     }
                 }
             }
-            NOP => {
+            NOP | NOP_1 | NOP_2 | NOP_3 | NOP_4 | NOP_5 | NOP_6=> {
                 match self.current_cycle {
                     2 => {
                         let _ = self.memory.get(self.pc()) as usize;
@@ -515,11 +520,7 @@ impl<T: Memory> Cpu2<T> {
                                 self.a
                             }
                             LSR => {
-                                let v = self.a;
-                                let bit0 = v & 1;
-                                self.p.set_c(bit0 != 0);
-                                let result = v >> 1;
-                                result
+                                self.lsr(self.a)
                             }
                             ROL => {
                                 let v = self.a;
@@ -570,6 +571,8 @@ impl<T: Memory> Cpu2<T> {
             // Immediate
             //
             LDA_IMM | LDX_IMM | LDY_IMM | EOR_IMM | AND_IMM | ORA_IMM | ADC_IMM | SBC_IMM | CMP_IMM
+                | NOP_7 | NOP_9 | NOP_10 | NOP_11 | NOP_8
+                | SBC_IMM | USBC_IMM
             => {
                 match self.current_cycle {
                     2 => {
@@ -588,7 +591,8 @@ impl<T: Memory> Cpu2<T> {
             // Absolute
             //
             LDA_ABS | LDX_ABS | LDY_ABS | EOR_ABS | AND_ABS | ORA_ABS | ADC_ABS | SBC_ABS | CMP_ABS
-            | CPX_ABS | CPY_ABS | BIT_ABS => {
+            | CPX_ABS | CPY_ABS | BIT_ABS | LAX_ABS | NOP_ABS_1
+            => {
                 match self.current_cycle {
                     2 => {
                         self.low_byte = self.memory.get(self.pc()) as usize;
@@ -612,7 +616,8 @@ impl<T: Memory> Cpu2<T> {
             // Read Modify Write instructions
             // Absolute
             //
-            ASL_ABS | LSR_ABS | ROL_ABS | ROR_ABS | INC_ABS | DEC_ABS => {
+            ASL_ABS | LSR_ABS | ROL_ABS | ROR_ABS | INC_ABS | DEC_ABS
+            | SLO_ABS | ISC_ABS | RLA_ABS | SRE_ABS | RRA_ABS | DCP_ABS => {
                 match self.current_cycle {
                     2 => {
                         self.low_byte = self.memory.get(self.pc()) as usize;
@@ -642,7 +647,7 @@ impl<T: Memory> Cpu2<T> {
             // Write instructions
             // Absolute
             //
-            STA_ABS | STX_ABS |STY_ABS => {
+            STA_ABS | STX_ABS |STY_ABS | SAX_ABS => {
                 match self.current_cycle {
                     2 => {
                         self.low_byte = self.memory.get(self.pc()) as usize;
@@ -667,7 +672,7 @@ impl<T: Memory> Cpu2<T> {
             // Zero Page
             //
             LDA_ZP | LDX_ZP | LDY_ZP | EOR_ZP | AND_ZP | ORA_ZP | ADC_ZP | SBC_ZP | CMP_ZP | BIT_ZP
-                | CPX_ZP | CPY_ZP => {
+                | CPX_ZP | CPY_ZP | LAX_ZP | NOP_ZP | NOP_13 | NOP_14 => {
                 match self.current_cycle {
                     2 => {
                         self.current_address = self.memory.get(self.pc()) as u16;
@@ -687,7 +692,8 @@ impl<T: Memory> Cpu2<T> {
             // Read Modify Write instructions
             // Zero page
             //
-            ASL_ZP | LSR_ZP | ROL_ZP | ROR_ZP | INC_ZP | DEC_ZP => {
+            ASL_ZP | LSR_ZP | ROL_ZP | ROR_ZP | INC_ZP | DEC_ZP
+            | SLO_ZP | ISC_ZP | RLA_ZP | SRE_ZP | RRA_ZP | DCP_ZP => {
                 match self.current_cycle {
                     2 => {
                         //         2    PC     R  fetch address, increment PC
@@ -718,7 +724,7 @@ impl<T: Memory> Cpu2<T> {
             // Write instructions
             // Zero page
             //
-            STA_ZP | STX_ZP | STY_ZP => {
+            STA_ZP | STX_ZP | STY_ZP | SAX_ZP => {
                 match self.current_cycle {
                     2 => {
                         //         2    PC     R  fetch address, increment PC
@@ -740,7 +746,7 @@ impl<T: Memory> Cpu2<T> {
             // Zero page indexed addressing
             //
             LDA_ZP_X | LDY_ZP_X | EOR_ZP_X | AND_ZP_X | ORA_ZP_X | ADC_ZP_X | SBC_ZP_X | CMP_ZP_X
-                | LDX_ZP_Y => {
+                | LDX_ZP_Y | LAX_ZP_Y | NOP_ZP_X | NOP_16 | NOP_17 | NOP_18 | NOP_19 | NOP_20 => {
                 match self.current_cycle {
                     2 => {
                         //        2     PC      R  fetch address, increment PC
@@ -750,8 +756,17 @@ impl<T: Memory> Cpu2<T> {
                     }
                     3 => {
                         //         3   address   R  read from address, add index register to it
-                        let _ = self.memory.get(self.current_address);
-                        let increment = if op == LDX_ZP_Y { self.y } else { self.x };
+                        self.current_value = self.memory.get(self.current_address);
+                        let increment = match op {
+                            LDA_ZP_X | LDY_ZP_X | EOR_ZP_X | AND_ZP_X | ORA_ZP_X | ADC_ZP_X
+                            | SBC_ZP_X | CMP_ZP_X | NOP_ZP_X | NOP_16 | NOP_17 | NOP_18 | NOP_19 | NOP_20 => {
+                                self.x
+                            }
+                            LDX_ZP_Y | LAX_ZP_Y => {
+                                self.y
+                            }
+                            _ => { panic!("Forgot a register"); }
+                        };
                         self.current_address = (self.current_address + increment as u16) & 0xff;
                         debug!(target: "cpu", "3 address:{:04X}", self.current_address);
                     }
@@ -769,7 +784,9 @@ impl<T: Memory> Cpu2<T> {
             // Read Modify Write instructions
             // Zero page indexed addressing
             //
-            ASL_ZP_X | LSR_ZP_X | ROL_ZP_X | ROR_ZP_X | INC_ZP_X | DEC_ZP_X => {
+            ASL_ZP_X | LSR_ZP_X | ROL_ZP_X | ROR_ZP_X | INC_ZP_X | DEC_ZP_X
+                | SLO_ZP_X | ISC_ZP_X | RLA_ZP_X | SRE_ZP_X | RRA_ZP_X | DCP_ZP_X =>
+            {
                 match self.current_cycle {
                     2 => {
                         //         2     PC      R  fetch address, increment PC
@@ -803,7 +820,7 @@ impl<T: Memory> Cpu2<T> {
             // Write instructions
             // Zero page indexed addressing
             //
-            STA_ZP_X | STY_ZP_X | STX_ZP_Y => {
+            STA_ZP_X | STY_ZP_X | STX_ZP_Y | SAX_ZP_Y => {
                 match self.current_cycle {
                     2 => {
                         //         2     PC      R  fetch address, increment PC
@@ -812,8 +829,12 @@ impl<T: Memory> Cpu2<T> {
                     }
                     3 => {
                         //         3   address   R  read from address, add index register to it
+                        let increment = match op {
+                            STA_ZP_X | STY_ZP_X => { self.x }
+                            STX_ZP_Y | SAX_ZP_Y => { self.y }
+                            _ => { panic!("Forgot an opcode "); }
+                        };
                         let _ = self.memory.get(self.current_address);
-                        let increment = if op == STX_ZP_Y { self.y } else { self.x };
                         self.current_address = (self.current_address + increment as u16) & 0xff;
                     }
                     4 => {
@@ -826,11 +847,56 @@ impl<T: Memory> Cpu2<T> {
                 }
             }
 
+            // Read Modify Write
+            // Indexed indirect (X)
+            SLO_IND_X | ISC_IND_X | RLA_IND_X | SRE_IND_X | RRA_IND_X | DCP_IND_X => {
+                match self.current_cycle {
+                    2 => {
+                        //         2      PC       R  fetch pointer address, increment PC
+                        //         2     PC      R  fetch address, increment PC
+                        self.current_address = self.memory.get(self.pc()) as u16;
+                        self.inc_pc();
+                    }
+                    3 => {
+                        //         3    pointer    R  read from the address, add X to it
+                        let _ = self.memory.get(self.current_address);
+                        self.current_address = (self.current_address + self.x as u16) & 0xff;
+                    }
+                    4 => {
+                        //         4   pointer+X   R  fetch effective address low
+                        self.low_byte = self.memory.get(self.current_address) as usize;
+                    }
+                    5 => {
+                        //         5  pointer+X+1  R  fetch effective address high
+                        let address = (self.current_address.wrapping_add(1)) & 0xff;
+                        let high_byte = self.memory.get(address);
+                        self.current_address = (high_byte as u16) << 8 | self.low_byte as u16;
+                    }
+                    6 => {
+                        //         6    address    R  read from effective address
+                        self.current_value = self.memory.get(self.current_address);
+                    }
+                    7 => {
+                        //         7    address    W  write the value back to effective address,
+                        //                            and do the operation on it
+                        self.memory.set(self.current_address, self.current_value);
+                    }
+                    8 => {
+                        //         8    address    W  write the new value to effective address
+                        self.read_modify_write();
+                    }
+                    _ => if self.current_cycle != 1 {
+                        panic!("Cycle {} should not happen", self.current_cycle)
+                    }
+                }
+            }
+
             //
             // Read
             // Indexed indirect (X)
             //
-            LDA_IND_X | ORA_IND_X | EOR_IND_X | AND_IND_X | ADC_IND_X | CMP_IND_X | SBC_IND_X => {
+            LDA_IND_X | ORA_IND_X | EOR_IND_X | AND_IND_X | ADC_IND_X | CMP_IND_X | SBC_IND_X
+            | LAX_IND_X => {
                 match self.current_cycle {
                     2 => {
                         self.low_byte = self.memory.get(self.pc()) as usize;
@@ -867,7 +933,7 @@ impl<T: Memory> Cpu2<T> {
             // Write
             // Indexed Indirect (X)
             //
-            STA_IND_X => {
+            STA_IND_X | SAX_IND_X => {
                 match self.current_cycle {
                     2 => {
                         //         2      PC       R  fetch pointer address, increment PC
@@ -908,7 +974,9 @@ impl<T: Memory> Cpu2<T> {
             //
             LDA_ABS_X | LDY_ABS_X | EOR_ABS_X | AND_ABS_X | ORA_ABS_X | ADC_ABS_X | SBC_ABS_X
                 | CMP_ABS_X | LDA_ABS_Y | LDX_ABS_Y | EOR_ABS_Y | AND_ABS_Y | ORA_ABS_Y
-                | ADC_ABS_Y | SBC_ABS_Y | CMP_ABS_Y => {
+                | ADC_ABS_Y | SBC_ABS_Y | CMP_ABS_Y | LAX_ABS_Y
+                | NOP_1C_ABS_X | NOP_3C_ABS_X | NOP_5C_ABS_X | NOP_7C_ABS_X | NOP_DC_ABS_X | NOP_FC_ABS_X
+            => {
                 match self.current_cycle {
                     2 => {
                         //         2     PC      R  fetch low byte of address, increment PC
@@ -922,9 +990,11 @@ impl<T: Memory> Cpu2<T> {
                         let high_byte = self.memory.get(self.pc()) as usize;
                         let increment = match op {
                             LDA_ABS_X | LDY_ABS_X | EOR_ABS_X | AND_ABS_X | ORA_ABS_X | ADC_ABS_X |
-                                SBC_ABS_X | CMP_ABS_X => { self.x as u16 }
+                                SBC_ABS_X | CMP_ABS_X
+                            | NOP_1C_ABS_X | NOP_3C_ABS_X | NOP_5C_ABS_X | NOP_7C_ABS_X | NOP_DC_ABS_X | NOP_FC_ABS_X
+                            => { self.x as u16 }
                             LDA_ABS_Y | LDX_ABS_Y | EOR_ABS_Y | AND_ABS_Y | ORA_ABS_Y | ADC_ABS_Y |
-                            SBC_ABS_Y | CMP_ABS_Y => { self.y as u16 }
+                            SBC_ABS_Y | CMP_ABS_Y | LAX_ABS_Y => { self.y as u16 }
                             _ => { panic!("Should never happen"); }
                         };
                         let old = (high_byte as u16) << 8 | self.low_byte as u16;
@@ -977,7 +1047,7 @@ impl<T: Memory> Cpu2<T> {
 
                         let old = (high_byte as u16) << 8 | self.low_byte as u16;
                         self.low_byte = (self.low_byte + self.x as usize) & 0xff;
-                        let new = old + self.x as u16;
+                        let new = (old as u32 + self.x as u32) as u16;
                         self.page_crossed = ((old ^ new) & 0xff00) > 0;
                         if self.page_crossed {
                             self.current_address = new.wrapping_sub(0x100);
@@ -1014,10 +1084,68 @@ impl<T: Memory> Cpu2<T> {
             }
 
             //
-            // Write instructions
-            // Absolute Indexed addressing
+            // Read Modify Write
+            // Absolute Indexed addressing (Y)
+            // e.g. slo $17FF,Y
             //
-            STA_ABS_X | STA_ABS_Y => {
+            SLO_ABS_Y | SLO_ABS_X | ISC_ABS_Y | ISC_ABS_X | RLA_ABS_X | RLA_ABS_Y
+            | SRE_ABS_X | SRE_ABS_Y | RRA_ABS_X | RRA_ABS_Y | DCP_ABS_Y | DCP_ABS_X => {
+                match self.current_cycle {
+                    2 => {
+                        //         2      PC       R  fetch pointer address, increment PC
+                        self.low_byte = self.memory.get(self.pc()) as usize;
+                        self.inc_pc();
+                    }
+                    3 => {
+                        //         3    pointer    R  fetch effective address low
+                        self.pointer = self.memory.get(self.pc()) as u16;
+                        self.inc_pc();
+                    }
+                    4 => {
+                        //         4   pointer+1   R  fetch effective address high,
+                        //                            add Y to low byte of effective address
+                        let value = match op {
+                            SLO_ABS_Y | ISC_ABS_Y | RLA_ABS_Y | SRE_ABS_Y | RRA_ABS_Y | DCP_ABS_Y => { self.y }
+                            SLO_ABS_X | ISC_ABS_X | RLA_ABS_X | SRE_ABS_X | RRA_ABS_X | DCP_ABS_X => { self.x }
+                            _ => {
+                                panic!("Forgot a case");
+                            }
+                        };
+                        let added = self.low_byte as u16 + value as u16;
+                        let all = (self.pointer << 8) | (added & 0xff);
+                        self.pointer = added;
+                        self.low_byte = self.low_byte.wrapping_add(self.y as usize);
+                        self.current_address = all;
+                        self.current_value = self.memory.get(self.current_address);
+                    }
+                    5 => {
+                        //         5   address+Y*  R  read from effective address,
+                        //                            fix high byte of effective address
+                        if self.pointer >= 0x100 {
+                            self.current_address = self.current_address.wrapping_add(0x100);
+                        }
+                        self.current_value = self.memory.get(self.current_address);
+                    }
+                    6 => {
+                        //         7   address+Y   W  write the value back to effective address,
+                        //                            and do the operation on it
+                        self.memory.set(self.current_address, self.current_value);
+                    }
+                    7 => {
+                        //         8   address+Y   W  write the new value to effective address
+                        self.read_modify_write();
+                    }
+                    _ => if self.current_cycle != 1 {
+                        panic!("Cycle {} should not happen", self.current_cycle)
+                    }
+                }
+            }
+
+            //
+            // Write instructions
+            // Absolute Indexed addressing (X)
+            //
+            STA_ABS_X | STA_ABS_Y | SHA_ABS_Y | SHX_ABS_X | SHY_ABS_X | TAS_ABS_Y => {
                 match self.current_cycle {
                     2 => {
                         //         2    PC       R  fetch low byte of address, increment PC
@@ -1031,10 +1159,13 @@ impl<T: Memory> Cpu2<T> {
                         let high_byte = self.memory.get(self.pc()) as usize;
 
                         let old = (high_byte as u16) << 8 | self.low_byte as u16;
-                        let increment = if op == STA_ABS_X { self.x } else if op == STA_ABS_Y { self.y }
-                            else { panic!("WRONG OPCODE") } as usize;
+                        let increment = match op {
+                            STA_ABS_X | SHY_ABS_X | SHX_ABS_X => { self.x }
+                            STA_ABS_Y | SHA_ABS_Y | TAS_ABS_Y => { self.y }
+                            _ => { panic!("WRONG OPCODE"); }
+                        } as usize;
                         self.low_byte = (self.low_byte + increment) & 0xff;
-                        let new = old + increment as u16;
+                        let new = (old as u32 + increment as u32) as u16;
                         self.page_crossed = ((old ^ new) & 0xff00) > 0;
                         if self.page_crossed {
                             self.current_address = new.wrapping_sub(0x100);
@@ -1065,7 +1196,7 @@ impl<T: Memory> Cpu2<T> {
             // Read
             // Indirect indexed (Y)
             //
-            LDA_IND_Y | EOR_IND_Y | AND_IND_Y | ORA_IND_Y | ADC_IND_Y | SBC_IND_Y | CMP_IND_Y => {
+            LDA_IND_Y | EOR_IND_Y | AND_IND_Y | ORA_IND_Y | ADC_IND_Y | SBC_IND_Y | CMP_IND_Y | LAX_IND_Y => {
                 match self.current_cycle {
                     2 => {
                         //         2      PC       R  fetch pointer address, increment PC
@@ -1115,10 +1246,68 @@ impl<T: Memory> Cpu2<T> {
                 }
             }
 
+            // Read Modify Write
+            // Indirect indexed (Y)
+            //
+            SLO_IND_Y | ISC_IND_Y | RLA_IND_Y | SRE_IND_Y | RRA_IND_Y | DCP_IND_Y => {
+                match self.current_cycle {
+                    2 => {
+                        //         2      PC       R  fetch pointer address, increment PC
+                        self.pointer = self.memory.get(self.pc()) as u16;
+                        self.inc_pc();
+                    }
+                    3 => {
+                        //         3    pointer    R  fetch effective address low
+                        self.low_byte = self.memory.get(self.pointer) as usize;
+                    }
+                    4 => {
+                        //         4   pointer+1   R  fetch effective address high,
+                        //                            add Y to low byte of effective address
+                        let high_byte = self.memory.get((self.pointer + 1) & 0xff) as usize;
+                        let old = (high_byte << 8) | self.low_byte;
+                        self.low_byte = (self.low_byte + self.y as usize) & 0xff;
+                        self.current_address = (old as u32 + self.y as u32) as u16;
+                        // info!("high: {high_byte:02X}, low: {:02X}, old: {old:04X}, page_crossed: {}",
+                        //     self.low_byte, self.page_crossed);
+                        self.page_crossed = ((old as u16 ^ self.current_address) & 0xff00) > 0;
+                        if self.page_crossed {
+                            self.current_address = self.current_address.wrapping_sub(0x100);
+                        }
+                        // } else {
+                        //     self.current_address = new as u16;
+                        // }
+                    }
+                    5 => {
+                        //         5   address+Y*  R  read from effective address,
+                        //                            fix high byte of effective address
+                        self.current_value = self.memory.get(self.current_address);
+                    }
+                    6 => {
+                        //         6   address+Y   R  read from effective address
+                        if self.page_crossed {
+                            self.current_address = self.current_address.wrapping_add(0x100);
+                        }
+                        self.current_value = self.memory.get(self.current_address);
+                    }
+                    7 => {
+                        //         7   address+Y   W  write the value back to effective address,
+                        //                            and do the operation on it
+                        self.memory.set(self.current_address, self.current_value);
+                    }
+                    8 => {
+                        //         8   address+Y   W  write the new value to effective address
+                        self.read_modify_write();
+                    }
+                    _ => if self.current_cycle != 1 {
+                        panic!("Cycle {} should not happen", self.current_cycle)
+                    }
+                }
+            }
+
             // Write
             // Indirect indexed (Y)
             //
-            STA_IND_Y => {
+            STA_IND_Y | SHA_IND_Y => {
                 match self.current_cycle {
                     2 => {
                         //         2      PC       R  fetch pointer address, increment PC
@@ -1154,8 +1343,10 @@ impl<T: Memory> Cpu2<T> {
                     }
                     6 => {
                         //         6   address+Y   W  write to effective address
-                        if self.page_crossed {
-                            self.current_address = self.current_address.wrapping_add(0x100);
+                        if op == STA_IND_Y {
+                            if self.page_crossed {
+                                self.current_address = self.current_address.wrapping_add(0x100);
+                            }
                         }
                         debug!(target: "cpu", "6 current_value:{:02X}", self.current_value);
                         self.write();
@@ -1235,8 +1426,11 @@ impl<T: Memory> Cpu2<T> {
             }
 
             _ => {
-                println!("Unknown opcode {op:02X} at PC:{:04X}", self.pc());
-                exit(1);
+                // info!(target: "asm", "Unknown opcode {op:02X} at PC:{:04X}", self.pc());
+
+                self.current_cycle = OPERANDS_6502[op as usize].size as usize;
+                self.finished = true;
+                // exit(1);
             }
         }
 
@@ -1246,7 +1440,7 @@ impl<T: Memory> Cpu2<T> {
 
         self.instruction_cycles += result;
 
-        if self.finished && DEBUG2_ASM {
+        if self.finished && config.debug_asm {
             let resolved_address: Option<u16> = None;
             let resolved_value: Option<u8> = None;
             let resolved_read = true;
@@ -1297,7 +1491,7 @@ impl<T: Memory> Cpu2<T> {
     fn sbc(&mut self, v: u8) {
         // println!("SBC A={:02X} V={:02X}", self.a, v);
 
-        if self.p.d() {
+        if self.p.d() && ! matches!(self.system, System::Nes) {
             let c = if self.p.c() as u8 == 0 { 1 } else { 0 };
             let diff: u16 = (self.a as u16).wrapping_sub(v as u16).wrapping_sub(c as u16);
             let mut al: u8 = (self.a & 0x0f).wrapping_sub(v & 0x0f).wrapping_sub(c);
@@ -1375,6 +1569,35 @@ impl<T: Memory> Cpu2<T> {
             INC_ABS | INC_ZP | INC_ZP_X | INC_ABS_X => {
                 self.current_value.wrapping_add(1)
             }
+            SLO_IND_X | SLO_ZP_X | SLO_ZP | SLO_ABS | SLO_IND_Y | SLO_ABS_Y | SLO_ABS_X => {
+                self.slo();
+                self.finished = true;
+                return;
+            }
+            ISC_IND_X | ISC_ZP_X | ISC_ZP | ISC_ABS | ISC_IND_Y | ISC_ABS_Y | ISC_ABS_X => {
+                self.isc();
+                self.finished = true;
+                return;
+            }
+            RLA_ZP | RLA_ZP_X | RLA_ABS | RLA_ABS_X | RLA_ABS_Y | RLA_IND_X | RLA_IND_Y => {
+                self.rla();
+                self.finished = true;
+                return;
+            }
+            SRE_ZP | SRE_ZP_X | SRE_ABS | SRE_ABS_X | SRE_ABS_Y | SRE_IND_X | SRE_IND_Y => {
+                self.sre();
+                self.finished = true;
+                return;
+            }
+            RRA_ZP | RRA_ZP_X | RRA_ABS | RRA_ABS_X | RRA_ABS_Y | RRA_IND_X | RRA_IND_Y => {
+                self.rra();
+                self.finished = true;
+                return;
+            }
+            DCP_ZP | DCP_ZP_X | DCP_ABS | DCP_ABS_X | DCP_ABS_Y | DCP_IND_X | DCP_IND_Y => {
+                self.dcp();
+                return;
+            }
             _ => panic!("0 Should not happen"),
         };
         self.memory.set(self.current_address, value);
@@ -1412,6 +1635,7 @@ impl<T: Memory> Cpu2<T> {
                 value = self.a;
             }
             SBC_ABS | SBC_ZP | SBC_ZP_X | SBC_ABS_X | SBC_ABS_Y | SBC_IND_X | SBC_IND_Y | SBC_IMM
+            | USBC_IMM
             => {
                 self.sbc(value);
                 value = self.a;
@@ -1430,7 +1654,27 @@ impl<T: Memory> Cpu2<T> {
                 nz = false;
                 value = self.bit(value);
             }
-            _ => panic!("1 Should not happen"),
+            RRA_ZP | RRA_ZP_X | RRA_ABS | RRA_ABS_X | RRA_ABS_Y | RRA_IND_X | RRA_IND_Y => {
+                self.rra();
+                self.finished = true;
+                return;
+            }
+            LAX_ZP | LAX_ZP_Y | LAX_ABS | LAX_ABS_Y | LAX_IND_X | LAX_IND_Y => {
+                let v = value;
+                self.a = v;
+                self.x = v;
+                self.set_nz(v);
+                self.finished = true;
+            }
+            NOP_ZP | NOP_13 | NOP_ABS_1 | NOP_14 | NOP_ZP_X | NOP_16 | NOP_17 | NOP_18 | NOP_19
+                | NOP_20 | NOP_1 | NOP_2 | NOP_3 | NOP_4 | NOP_5 | NOP_6 | NOP_7 | NOP_8 | NOP_9 | NOP_10
+            | NOP_11 | NOP_1C_ABS_X | NOP_3C_ABS_X | NOP_5C_ABS_X | NOP_7C_ABS_X | NOP_DC_ABS_X | NOP_FC_ABS_X
+            => {
+                nz = false;
+            }
+            _ => {
+                panic!("1 Should not happen, opcode: {:02X}", self.current_opcode);
+            }
         }
         if nz {
             self.set_nz(value);
@@ -1444,7 +1688,23 @@ impl<T: Memory> Cpu2<T> {
                 { self.memory.set(self.current_address, self.a); }
             STX_ABS | STX_ZP | STX_ZP_Y => { self.memory.set(self.current_address, self.x); }
             STY_ABS | STY_ZP | STY_ZP_X => { self.memory.set(self.current_address, self.y); }
-            _ => { panic!("Should never happen"); }
+            SAX_ZP | SAX_ZP_Y | SAX_ABS | SAX_IND_X => {
+                self.memory.set(self.current_address, self.a & self.x);
+            }
+            SHA_ABS_Y | SHA_IND_Y => {
+                self.sha();
+            }
+            TAS_ABS_Y => {
+                info!("TAS_ABS_Y not supported yet");
+            }
+            SHY_ABS_X => {
+                info!("SHY_ABS_X not supported yet");
+            }
+            SHX_ABS_X => {
+                info!("SHX_ABS_X not supported yet");
+            }
+
+            _ => { panic!("Should never happen, opcode:{:02X}", self.current_opcode); }
         }
         self.finished = true;
     }
@@ -1527,6 +1787,72 @@ impl<T: Memory> Cpu2<T> {
             _ => if self.current_cycle != 1 {
                 panic!("Cycle {} should not happen", self.current_cycle)
             }
+        }
+    }
+
+    fn lsr(&mut self, v: u8) -> u8 {
+        let bit0 = v & 1;
+        self.p.set_c(bit0 != 0);
+        let result = v >> 1;
+        self.p.set_nz_flags(result);
+        result
+    }
+
+    fn isc(&mut self) {
+        let new_value = self.current_value.wrapping_add(1);
+        self.memory.set(self.current_address, new_value);
+        self.sbc(new_value);
+    }
+
+    fn rla(&mut self) {
+        let new_value = self.rol(self.current_value);
+        self.memory.set(self.current_address, new_value);
+        self.a = self.a & new_value;
+        self.set_nz(self.a);
+    }
+
+    fn sre(&mut self) {
+        let new_value = self.lsr(self.current_value);
+        self.memory.set(self.current_address, new_value);
+        self.a = self.a ^ new_value;
+        self.set_nz(self.a);
+    }
+
+    fn rra(&mut self) {
+        let new_value = self.ror(self.current_value);
+        self.memory.set(self.current_address, new_value);
+        self.add(new_value);
+    }
+
+    fn dcp(&mut self) {
+        let value = self.current_value.wrapping_sub(1);
+        self.memory.set(self.current_address, value);
+        let value2 = self.cmp(self.a, value);
+        self.set_nz(value2);
+        self.finished = true;
+
+    }
+
+    fn slo(&mut self) {
+        self.p.set_c(self.current_value & 0x80 != 0);
+        let result = self.current_value << 1;
+        // println!("Setting [{:04X}]={:02X}", self.current_address, self.current_value);
+        self.memory.set(self.current_address, result);
+        // println!("Setting A({:02X}) to A | {:02X}, final:{:02X}", self.a, self.current_value, result);
+        self.a = self.a | result;
+        self.set_nz(self.a);
+        // println!("SLO_IND_X: address:{:04X} value:{:#04x} returning {:02X}",
+        //     self.current_address, self.current_value, self.a);
+    }
+
+    fn sha(&mut self) {
+        let high = (self.current_address >> 8) as u8;
+        let value = self.a & self.x & high.wrapping_add(1);
+        if self.page_crossed {
+            let new_high = value;
+            self.memory.set((self.current_address & 0x00FF) | ((new_high as u16) << 8), value);
+        } else {
+            self.memory.set(self.current_address, value);
         }
     }
 }

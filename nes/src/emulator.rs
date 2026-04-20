@@ -8,7 +8,7 @@ use crate::nes_memory::NesMemory;
 use crate::ppu::{Ppu, PpuResult, CURRENT_CYCLE, CURRENT_SCANLINE};
 use crate::rom::Rom;
 use crate::Args;
-use cpu::config::Config;
+use cpu::config::{Config, System};
 use cpu::cpu::Cpu;
 use cpu::cpu2::Cpu2;
 use cpu::external_logger::{DefaultLogger, IExternalLogger};
@@ -19,6 +19,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tracing::{debug, info};
+
+const TICK_BATCH_CYCLES: usize = 2_000;
 
 pub struct FrameStat {
     _duration_ms: u16,
@@ -114,11 +116,13 @@ pub struct Emulator {
     _fps: u16,
     _joypad: Joypad,
     _shared_state: Arc<RwLock<SharedState>>,
+    /// Bounded queue
+    pub sound_samples: Vec<f32>,
 }
 
 impl Emulator {
     pub fn new(rom_info: RomInfo,
-        shared_state: Arc<RwLock<SharedState>>, joypad: Arc<RwLock<Joypad>>, _args: Args)
+        shared_state: Arc<RwLock<SharedState>>, joypad: Arc<RwLock<Joypad>>, args: Args)
         -> Self
     {
         shared_state.write().unwrap().rom_name = rom_info.name();
@@ -156,6 +160,7 @@ impl Emulator {
             asynchronous_logging: cpu::cpu::LOG_ASYNC,
             trace_file_asm: format!("{home_dir}\\t\\trace.txt"),
             labels,
+            system: System::Nes,
             ..Default::default()
         };
         let mut mapper = MapperBase::new(&rom);
@@ -164,7 +169,11 @@ impl Emulator {
         let len = rom.prg_rom.len();
         debug!(target: "rom", "prg_rom length: {len:04X}");
         let irq = ((rom.prg_rom[len - 1] as u16) << 8) | rom.prg_rom[len - 2] as u16;
-        let pc = ((rom.prg_rom[len - 3] as u16) << 8) | rom.prg_rom[len - 4] as u16;
+        let pc = if let Some(pc) = &args.pc {
+            u16::from_str_radix(pc, 16).expect("Failed to parse PC as hexadecimal")
+        } else {
+            ((rom.prg_rom[len - 3] as u16) << 8) | rom.prg_rom[len - 4] as u16
+        };
         let nmi = ((rom.prg_rom[len - 5] as u16) << 8) | rom.prg_rom[len - 6] as u16;
         debug!(target: "rom", "IRQ:{irq:04X} RESET:{pc:04X} NMI:{nmi:04X}");
         let mut nes_memory = NesMemory::new(mapper, joypad.clone(), ppu.clone(), apu.clone());
@@ -200,12 +209,13 @@ impl Emulator {
             _fps: 0,
             _joypad: Joypad::new(),
             _shared_state: shared_state,
+            sound_samples: Vec::new(),
         }
     }
 
     pub fn tick(&mut self) -> u128 {
         let mut cycles = 0;
-        for _ in 1..10_000 {
+        for _ in 0..TICK_BATCH_CYCLES {
             cycles += self.tick_one().1;
         }
         cycles
@@ -264,7 +274,9 @@ impl Emulator {
                 self.frame_count.push(FrameStat {
                     _duration_ms: self.frame_start.elapsed().as_millis() as u16
                 });
-                self.apu.write().unwrap().flush_samples();
+                self.sound_samples.append(
+                    &mut self.apu.write().unwrap().flush_samples()
+                );
             }
         }
 

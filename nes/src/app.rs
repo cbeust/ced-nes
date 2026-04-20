@@ -7,7 +7,7 @@ use crate::Args;
 use iced::alignment::Horizontal;
 use iced::keyboard::Key;
 use iced::mouse::Cursor;
-use iced::widget::canvas::{Cache, Fill, Geometry, Program};
+use iced::widget::canvas::{Cache, Fill, Geometry, Path, Program, Stroke};
 use iced::widget::scrollable::Id;
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::widget::{checkbox, Canvas, Column, Row};
@@ -16,10 +16,10 @@ use iced_futures::backend::default::time::every;
 use iced_futures::core::SmolStr;
 use iced_futures::Subscription;
 use rand::Rng;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::broadcast::{error::RecvError, Receiver, Sender};
 use tracing::{info};
 
 pub struct App {
@@ -41,6 +41,8 @@ pub struct App {
     pulse2_enabled: bool,
     noise_enabled: bool,
     dmc_enabled: bool,
+    is_paused: bool,
+    waveform_samples: Vec<f32>,
 }
 
 pub struct SharedState {
@@ -86,25 +88,43 @@ impl App {
             pulse2_enabled: true,
             noise_enabled: true,
             dmc_enabled: true,
+            is_paused: false,
+            waveform_samples: Vec::new(),
         }
     }
 
     pub fn subscription(&self) -> Subscription<AppMessage> {
-        let rec = self.sender_to_ui.clone().subscribe();
+        let sender_to_ui = self.sender_to_ui.clone();
+        let rec = sender_to_ui.subscribe();
         let cpu = iced_futures::futures::stream::unfold(
-            (rec, Arc::new(Mutex::new(String::new()))),
-            |(mut receiver, state)| async move {
-                let mut result = None;
-                if let Ok(m) = receiver.recv().await {
-                    use ToUiMessage::*;
-                    match m {
-                        Update(frequency, fps) => {
-                            result = Some(AppMessage::Update(frequency, fps));
-                        }
+            (rec, sender_to_ui),
+            |(mut receiver, sender_to_ui)| async move {
+                let mut message = match receiver.recv().await {
+                    Ok(ToUiMessage::Update(frequency, fps)) => {
+                        AppMessage::Update(frequency, fps)
                     }
+                    Ok(ToUiMessage::SoundSamples(samples)) => {
+                        AppMessage::SoundSamples(samples)
+                    }
+                    Err(RecvError::Lagged(_)) => AppMessage::Ignored,
+                    Err(RecvError::Closed) => {
+                        receiver = sender_to_ui.subscribe();
+                        AppMessage::Ignored
+                    }
+                };
+
+                while let Ok(next) = receiver.try_recv() {
+                    message = match next {
+                        ToUiMessage::Update(frequency, fps) => {
+                            AppMessage::Update(frequency, fps)
+                        }
+                        ToUiMessage::SoundSamples(samples) => {
+                            AppMessage::SoundSamples(samples)
+                        }
+                    };
                 }
 
-                Some((result.unwrap_or(AppMessage::Ignored), (receiver, state)))
+                Some((message, (receiver, sender_to_ui)))
             }
         );
         let cpu2 = Subscription::run_with_id(42, cpu);
@@ -144,6 +164,7 @@ pub enum AppMessage {
     Update(f32, u16),
     RomSelected(usize),
     Reboot,
+    TogglePause,
     Debug,
     RebootRandom,
     FilterTextChanged(String),
@@ -152,17 +173,20 @@ pub enum AppMessage {
     Pulse2Toggled(bool),
     NoiseToggled(bool),
     DmcToggled(bool),
+    SoundSamples(Vec<f32>),
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub enum ToUiMessage {
     // Frequency, FPS
     Update(f32, u16),
+    SoundSamples(Vec<f32>),
 }
 
 #[derive(Clone)]
 pub enum ToEmulatorMessage {
     Reboot(RomInfo),
+    Pause(bool),
     SoundPulse1(bool),
     SoundPulse2(bool),
     SoundTriangle(bool),
@@ -171,8 +195,81 @@ pub enum ToEmulatorMessage {
     Debug,
 }
 
+#[derive(Default, Clone)]
+pub struct CanvasState;
+
 #[derive(Default)]
-pub struct CanvasState {}
+pub struct SoundWaveformCanvas {
+    samples: Vec<f32>,
+}
+
+impl Program<AppMessage> for SoundWaveformCanvas {
+    type State = CanvasState;
+
+    fn draw(&self, _state: &Self::State, renderer: &Renderer, _theme: &Theme, bounds: Rectangle,
+        _cursor: Cursor) -> Vec<Geometry<Renderer>>
+    {
+        let mut frame = widget::canvas::Frame::new(renderer, bounds.size());
+
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), Fill::from(Color::BLACK));
+
+        let samples = &self.samples;
+
+        if samples.len() >= 2 {
+            let margin = 5.0;
+            let plot_width = (bounds.width - 2.0 * margin).max(1.0);
+            let plot_height = (bounds.height - 2.0 * margin).max(1.0);
+            let center_y = margin + plot_height / 2.0;
+            let amplitude = plot_height / 2.0;
+
+            let min_sample = samples
+                .iter()
+                .copied()
+                .fold(f32::INFINITY, f32::min);
+            let max_sample = samples
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
+            let sample_mid = (min_sample + max_sample) * 0.5;
+            let half_range = ((max_sample - min_sample) * 0.5).max(1e-6);
+
+            let baseline = Path::line(
+                Point::new(margin, center_y),
+                Point::new(margin + plot_width, center_y),
+            );
+            frame.stroke(
+                &baseline,
+                Stroke::default()
+                    .with_color(Color::from_rgb(0.2, 0.2, 0.2))
+                    .with_width(1.0),
+            );
+
+            let waveform = Path::new(|builder| {
+                let max_index = (samples.len() - 1) as f32;
+                for (index, sample) in samples.iter().enumerate() {
+                    let x = margin + (index as f32 / max_index) * plot_width;
+                    let centered = ((*sample - sample_mid) / half_range).clamp(-1.0, 1.0);
+                    let y = center_y - centered * amplitude;
+
+                    if index == 0 {
+                        builder.move_to(Point::new(x, y));
+                    } else {
+                        builder.line_to(Point::new(x, y));
+                    }
+                }
+            });
+
+            frame.stroke(
+                &waveform,
+                Stroke::default()
+                    .with_color(Color::from_rgb(0.0, 1.0, 0.0))
+                    .with_width(1.5),
+            );
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
 
 impl Program<AppMessage> for App {
     type State = CanvasState;
@@ -295,7 +392,12 @@ impl App {
                     let _ = self.sender_to_emulator.send(ToEmulatorMessage::Reboot(rom_info));
                 }
             }
+            TogglePause => {
+                self.is_paused = !self.is_paused;
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::Pause(self.is_paused));
+            }
             Debug => {
+                crate::iced::cycle_minifb_upscale_algorithm();
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::Debug);
             }
             RebootRandom => {
@@ -325,6 +427,9 @@ impl App {
             DmcToggled(enabled) => {
                 self.dmc_enabled = enabled;
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundDmc(enabled));
+            }
+            SoundSamples(samples) => {
+                self.waveform_samples = samples;
             }
         }
 
@@ -476,27 +581,12 @@ impl App {
             .width(Length::Fixed(150.0))
             .push(m_button("Reboot", AppMessage::Reboot, None))
             .push(m_button("Random", AppMessage::RebootRandom, None))
-            .push(m_button("Debug", AppMessage::Debug, Some(Color::from_rgb(0.2, 0.2, 0.8))))
-            .push(container(Column::new()
-                .spacing(10)
-                .push(checkbox("Triangle", self.triangle_enabled).on_toggle(AppMessage::TriangleToggled))
-                .push(checkbox("Pulse1", self.pulse1_enabled).on_toggle(AppMessage::Pulse1Toggled))
-                .push(checkbox("Pulse2", self.pulse2_enabled).on_toggle(AppMessage::Pulse2Toggled))
-                .push(checkbox("Noise", self.noise_enabled).on_toggle(AppMessage::NoiseToggled))
-                .push(checkbox("DMC", self.dmc_enabled).on_toggle(AppMessage::DmcToggled))
-            )
-            .padding(10)
-            .width(Length::Fill)
-            .style(|_theme| {
-                container::Style {
-                    border: Border {
-                        color: Color::BLACK,
-                        width: 1.0,
-                        radius: 5.0.into(),
-                    },
-                    ..Default::default()
-                }
-            }))
+            .push(m_button(
+                if self.is_paused { "Resume" } else { "Pause" },
+                AppMessage::TogglePause,
+                Some(Color::from_rgb(0.6, 0.5, 0.0)),
+            ))
+            .push(m_button(crate::iced::next_minifb_upscale_algorithm_name(), AppMessage::Debug, Some(Color::from_rgb(0.2, 0.2, 0.8))))
         )
             .style(|_theme| {
                 container::Style {
@@ -513,7 +603,54 @@ impl App {
                 .spacing(10)
                 .push(buttons)
                 .push(container(self.rom_panel()).width(Length::Fill))
-            ).padding(10).height(Length::Fixed(HEIGHT as f32 * SCALE_Y)).align_y(alignment::Vertical::Top))
+                .push(
+                    container(
+                        Column::new()
+                            .spacing(10)
+                            .push(
+                                container(
+                                    Row::new()
+                                        .spacing(20)
+                                        .push(
+                                            Column::new()
+                                                .spacing(10)
+                                                .push(checkbox("Triangle", self.triangle_enabled).on_toggle(AppMessage::TriangleToggled))
+                                                .push(checkbox("Pulse 1", self.pulse1_enabled).on_toggle(AppMessage::Pulse1Toggled))
+                                                .push(checkbox("Pulse 2", self.pulse2_enabled).on_toggle(AppMessage::Pulse2Toggled))
+                                        )
+                                        .push(
+                                            Column::new()
+                                                .spacing(10)
+                                                .push(checkbox("Noise", self.noise_enabled).on_toggle(AppMessage::NoiseToggled))
+                                                .push(checkbox("DMC", self.dmc_enabled).on_toggle(AppMessage::DmcToggled))
+                                        )
+                                )
+                                .padding(10)
+                                .width(Length::Fill)
+                                .style(|_theme| {
+                                    container::Style {
+                                        border: Border {
+                                            color: Color::BLACK,
+                                            width: 1.0,
+                                            radius: 5.0.into(),
+                                        },
+                                        ..Default::default()
+                                    }
+                                })
+                            )
+                            .push(
+                                Canvas::new(SoundWaveformCanvas {
+                                    samples: self.waveform_samples.clone(),
+                                })
+                                    .width(Length::Fixed(300.0))
+                                    .height(Length::Fixed(110.0))
+                            )
+                    )
+                )
+            )
+                .padding(10)
+                .height(Length::Fixed(HEIGHT as f32 * SCALE_Y))
+                .align_y(alignment::Vertical::Center))
             ;
 
         let mut column= Column::new();
@@ -582,19 +719,78 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
         .name("NES emulator thread".to_string())
         .spawn(move|| {
         let mut reboot = false;
+        let mut paused = false;
         loop {
             let mut emulator = Emulator::new(rom_info.clone(),
                 shared_state.clone(), joypad2.clone(), args.clone());
             let mut one_second_start = Instant::now();
+            let mut sound_flush_start = Instant::now();
             let mut one_second_cycles = 0;
 
             while ! reboot {
+                while let Ok(m) = receiver.try_recv() {
+                    match m {
+                        ToEmulatorMessage::Reboot(ri) => {
+                            info!("Emulator rebooting with {ri:#?})");
+                            reboot = true;
+                            paused = false;
+                            rom_info = ri;
+                        }
+                        ToEmulatorMessage::Pause(value) => {
+                            if paused != value {
+                                paused = value;
+                                one_second_cycles = 0;
+                                one_second_start = Instant::now();
+                                sound_flush_start = Instant::now();
+                                emulator.frame_stats.clear();
+                                emulator.frame_count.clear();
+                                emulator.frame_count_last = Instant::now();
+                            }
+                        }
+                        ToEmulatorMessage::Debug => {
+                            emulator.debug();
+                        }
+                        ToEmulatorMessage::SoundPulse1(enabled) => {
+                            emulator.apu.write().unwrap().set_pulse1_enabled(enabled);
+                        }
+                        ToEmulatorMessage::SoundPulse2(enabled) => {
+                            emulator.apu.write().unwrap().set_pulse2_enabled(enabled);
+                        }
+                        ToEmulatorMessage::SoundTriangle(enabled) => {
+                            emulator.apu.write().unwrap().set_triangle_enabled(enabled);
+                        }
+                        ToEmulatorMessage::SoundNoise(enabled) => {
+                            emulator.apu.write().unwrap().set_noise_enabled(enabled);
+                        }
+                        ToEmulatorMessage::SoundDmc(enabled) => {
+                            emulator.apu.write().unwrap().set_dmc_enabled(enabled);
+                        }
+                    }
+                }
+
+                if reboot {
+                    continue;
+                }
+
+                if paused {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+
                 let cycles = emulator.tick();
                 one_second_cycles += cycles;
 
-                // Refresh the frequency display every second
                 let elapsed = one_second_start.elapsed().as_millis();
+                let sound_elapsed = sound_flush_start.elapsed().as_millis();
+
+                if sound_elapsed > 100 && !emulator.sound_samples.is_empty() {
+                    let samples = std::mem::take(&mut emulator.sound_samples);
+                    let _ = sender.send(ToUiMessage::SoundSamples(samples));
+                    sound_flush_start = Instant::now();
+                }
+
                 if elapsed > 1000 {
+                    // Refresh the frequency display every second
                     let frames = emulator.frame_stats.len();
                     let frequency = one_second_cycles as f32 / (elapsed as f32 * 1000.0);
                     let _ = sender.send(ToUiMessage::Update(frequency, frames as u16));
@@ -617,44 +813,25 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
                     // info!("Frame count:{frame_count} time_wait:{time_wait_ms}");
                     if frame_count as u128 >= frame_cap_divided {
                         let elapsed = emulator.frame_count_last.elapsed().as_millis();
-                        // info!("  elapsed: {elapsed}");
-                        if elapsed < time_wait_ms {
-                            let sleep_ms = time_wait_ms - elapsed;
-                            // info!("  sleeping {sleep_ms}");
-                            thread::sleep(Duration::from_millis(sleep_ms as u64));
+                        if elapsed >= time_wait_ms {
                             emulator.frame_count.drain(0..frame_cap_divided as usize);
                             emulator.frame_count_last = Instant::now();
+                        } else {
+                            let can_sleep_for_video_throttle = emulator.apu.read().unwrap()
+                                .can_sleep_for_video_throttle();
+
+                            if can_sleep_for_video_throttle {
+                                let remaining_ms = (time_wait_ms - elapsed) as u64;
+                                if remaining_ms > 1 {
+                                    thread::sleep(Duration::from_millis(1));
+                                } else {
+                                    thread::yield_now();
+                                }
+                            }
                         }
                     }
                 }
 
-                while let Ok(m) = receiver.try_recv() {
-                    match m {
-                        ToEmulatorMessage::Reboot(ri) => {
-                            info!("Emulator rebooting with {ri:#?})");
-                            reboot = true;
-                            rom_info = ri;
-                        }
-                        ToEmulatorMessage::Debug => {
-                            emulator.debug();
-                        }
-                        ToEmulatorMessage::SoundPulse1(enabled) => {
-                            emulator.apu.write().unwrap().set_pulse1_enabled(enabled);
-                        }
-                        ToEmulatorMessage::SoundPulse2(enabled) => {
-                            emulator.apu.write().unwrap().set_pulse2_enabled(enabled);
-                        }
-                        ToEmulatorMessage::SoundTriangle(enabled) => {
-                            emulator.apu.write().unwrap().set_triangle_enabled(enabled);
-                        }
-                        ToEmulatorMessage::SoundNoise(enabled) => {
-                            emulator.apu.write().unwrap().set_noise_enabled(enabled);
-                        }
-                        ToEmulatorMessage::SoundDmc(enabled) => {
-                            emulator.apu.write().unwrap().set_dmc_enabled(enabled);
-                        }
-                    }
-                }
             }
             reboot = false;
         }

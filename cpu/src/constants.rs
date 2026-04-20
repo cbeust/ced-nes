@@ -23,7 +23,7 @@ pub const ORA_IMM: u8 = 0x09;
 pub const ASL: u8 = 0xa;
 pub const ANC_IMM: u8 = 0x0b;
 pub const NOP_0B_65C02: u8 = 0x0B;
-pub const NOP_ABS: u8 = 0x0c;
+pub const NOP_ABS_1: u8 = 0x0c;
 pub const TSB_ABS_65C02: u8 = 0x0c;
 pub const ORA_ABS: u8 = 0x0d;
 pub const ASL_ABS: u8 = 0xe;
@@ -48,6 +48,7 @@ pub const NOP_1: u8 = 0x1a;
 pub const INC_65C02: u8 = 0x1a;
 pub const SLO_ABS_Y: u8 = 0x1b;
 pub const NOP_1B_65C02: u8 = 0x1b;
+pub const NOP_1C_ABS_X: u8 = 0x1c;
 pub const TRB_ABS_65C02: u8 = 0x1c;
 pub const ORA_ABS_X: u8 = 0x1d;
 pub const ASL_ABS_X: u8 = 0x1e;
@@ -68,7 +69,7 @@ pub const RMB2_ZP_65C02: u8 = 0x27;
 pub const PLP: u8 = 0x28;
 pub const AND_IMM: u8 = 0x29;
 pub const ROL: u8 = 0x2a;
-pub const ANC2_IMM: u8 = 0x2b;
+pub const ANC2_ABS_Y: u8 = 0x2b;
 pub const NOP_2B_65C02: u8 = 0x2b;
 pub const BIT_ABS: u8 = 0x2c;
 pub const AND_ABS: u8 = 0x2d;
@@ -225,7 +226,7 @@ pub const BCC: u8 = 0x90;
 pub const STA_IND_Y: u8 = 0x91;
 pub const JAM_9: u8 = 0x92;
 pub const STA_ZPI_65C02: u8 = 0x92;
-pub const SHA_ABS_Y: u8 = 0x93;
+pub const SHA_IND_Y: u8 = 0x93;
 pub const NOP_93_65C02: u8 = 0x93;
 pub const STY_ZP_X: u8 = 0x94;
 pub const STA_ZP_X: u8 = 0x95;
@@ -243,7 +244,7 @@ pub const STA_ABS_X: u8 = 0x9d;
 pub const SHX_ABS_X: u8 = 0x9e;
 pub const STZ_ABS_X_65C02: u8 = 0x9e;
 pub const BBS_1_65C02: u8 = 0x9f;
-pub const SHA_IND_Y: u8 = 0x9f;
+pub const SHA_ABS_Y: u8 = 0x9f;
 
 pub const LDY_IMM: u8 = 0xa0;
 pub const LDA_IND_X: u8 = 0xa1;
@@ -254,7 +255,6 @@ pub const LDY_ZP: u8 = 0xa4;
 pub const LDA_ZP: u8 = 0xa5;
 pub const LDX_ZP: u8 = 0xa6;
 pub const LAX_ZP: u8 = 0xa7;
-pub const SMB2_ZP_65C02: u8 = 0xa7;
 pub const TAY: u8 = 0xa8;
 pub const LDA_IMM: u8 = 0xa9;
 pub const TAX: u8 = 0xaa;
@@ -276,7 +276,6 @@ pub const LDY_ZP_X: u8 = 0xb4;
 pub const LDA_ZP_X: u8 = 0xb5;
 pub const LDX_ZP_Y: u8 = 0xb6;
 pub const LAX_ZP_Y: u8 = 0xb7;
-pub const SMB3_ZP_65C02: u8 = 0xb7;
 pub const CLV: u8 = 0xb8;
 pub const LDA_ABS_Y: u8 = 0xb9;
 pub const TSX: u8 = 0xba;
@@ -298,7 +297,6 @@ pub const CPY_ZP: u8 = 0xc4;
 pub const CMP_ZP: u8 = 0xc5;
 pub const DEC_ZP: u8 = 0xc6;
 pub const DCP_ZP: u8 = 0xc7;
-pub const SMB4_ZP_65C02: u8 = 0xc7;
 pub const INY: u8 = 0xc8;
 pub const CMP_IMM: u8 = 0xc9;
 pub const NOP_6: u8 = 0xfa;
@@ -324,7 +322,7 @@ pub const DCP_ZP_X: u8 = 0xd7;
 pub const SMB5_ZP_65C02: u8 = 0xd7;
 pub const CLD: u8 = 0xd8;
 pub const CMP_ABS_Y: u8 = 0xd9;
-pub const PHX_65C02: u8 = 0xda;
+pub const NOP_5: u8 = 0xda;
 pub const DCP_ABS_Y: u8 = 0xdb;
 pub const STP_65C02: u8 = 0xdb;
 pub const NOP_DC_ABS_X: u8 = 0xdc;
@@ -343,7 +341,6 @@ pub const CPX_ZP: u8 = 0xe4;
 pub const SBC_ZP: u8 = 0xe5;
 pub const INC_ZP: u8 = 0xe6;
 pub const ISC_ZP: u8 = 0xe7;
-pub const SMB6_ZP_65C02: u8 = 0xe7;
 pub const INX: u8 = 0xe8;
 pub const SBC_IMM: u8 = 0xe9;
 pub const NOP: u8 = 0xea;
@@ -400,7 +397,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(ORA_IMM, 2, "ORA", 2, Immediate),
     op(ASL, 1, "ASL A", 2, Register_A),
     op(ANC_IMM, 2, "anc", 2, Immediate),
-    op(NOP_ABS, 3, "nop", 4, Absolute),
+    op(NOP_ABS_1, 3, "nop", 5, Absolute),
     op(ORA_ABS, 3, "ORA", 4, Absolute),
     op(ASL_ABS, 3, "ASL", 6, Absolute),
     op(SLO_ABS, 3, "slo", 6, Absolute),
@@ -410,15 +407,15 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(ORA_IND_Y, 2, "ORA", 5, Indirect_Y),
     op(JAM_12, 0, "nop", 3, Zpi),
     op(SLO_IND_Y, 2, "slo", 8, Indirect_Y),
-    op(NOP_ZP_X, 1, "nop", 3, Zp_X),
+    op(NOP_ZP_X, 2, "nop", 3, Zp_X),
     op(ORA_ZP_X, 2, "ORA", 4, Zp_X),
     op(ASL_ZP_X, 2, "ASL", 6, Zp_X),
     op(SLO_ZP_X, 2, "slo", 6, Zp_X),
     op(CLC, 1, "CLC", 2, Unknown),
     op(ORA_ABS_Y, 3, "ORA", 4, Absolute_Y),
-    op(NOP_1, 1, "nop", 2, Unknown),
+    op(NOP_1, 1, "nop", 1, Unknown),
     op(SLO_ABS_Y, 3, "slo", 7, Absolute_Y),
-    op(NOP_ABS, 1, "nop", 4, Absolute),
+    op(NOP_1C_ABS_X, 3, "nop", 5, Absolute_X),
     op(ORA_ABS_X, 3, "ORA", 4, Absolute_X),
     op(ASL_ABS_X, 3, "ASL", 7, Absolute_X),
     op(SLO_ABS_X, 3, "slo", 7, Absolute_X),
@@ -434,8 +431,8 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(RLA_ZP, 2, "rla", 5, Zp),
     op(PLP, 1, "PLP", 4, Unknown),
     op(AND_IMM, 2, "AND", 2, Immediate),
-    op(ROL, 1, "ROL", 2, Register_A),
-    op(ANC2_IMM, 2, "anc", 2, Immediate),
+    op(ROL, 1, "ROL A", 2, Register_A),
+    op(ANC2_ABS_Y, 3, "rla", 2, Absolute_Y),
     op(BIT_ABS, 3, "BIT", 4, Absolute),
     op(AND_ABS, 3, "AND", 4, Absolute),
     op(ROL_ABS, 3, "ROL", 6, Absolute),
@@ -452,9 +449,9 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(RLA_ZP_X, 2, "rla", 6, Zp_X),
     op(SEC, 1, "SEC", 2, Unknown),   // 8
     op(AND_ABS_Y, 3, "AND", 4, Absolute_Y), // 9
-    op(NOP_2, 1, "nop", 2, Unknown),
-    op(ANC2_IMM, 2, "anc", 2, Immediate),
-    op(NOP_3C_ABS_X, 3, "nop", 4, Absolute_X),
+    op(NOP_2, 1, "nop", 1, Unknown),
+    op(ANC2_ABS_Y, 2, "anc", 2, Immediate),
+    op(NOP_3C_ABS_X, 3, "nop", 5, Absolute_X),
     op(AND_ABS_X, 3, "AND", 4, Absolute_X),
     op(ROL_ABS_X, 3, "ROL", 7, Absolute_X),
     op(RLA_ABS_X, 3, "rla", 7, Absolute_X),
@@ -470,7 +467,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(SRE_ZP, 2, "sre", 5, Zp),
     op(PHA, 1, "PHA", 3, Unknown),
     op(EOR_IMM, 2, "EOR", 2, Immediate),
-    op(LSR, 1, "LSR", 2, Register_A),
+    op(LSR, 1, "LSR A", 2, Register_A),
     op(ALR_IMM, 2, "alr", 2, Immediate),
     op(JMP, 3, "JMP", 3, Absolute),
     op(EOR_ABS, 3, "EOR", 4, Absolute),
@@ -488,9 +485,9 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(SRE_ZP_X, 2, "sre", 6, Zp_X),
     op(CLI, 1, "CLI", 2, Unknown),
     op(EOR_ABS_Y, 3, "EOR", 4, Absolute_Y),
-    op(NOP_3, 1, "nop", 2, Unknown),
+    op(NOP_3, 1, "nop", 1, Unknown),
     op(SRE_ABS_Y, 3, "sre", 7, Absolute_Y),
-    op(NOP_5C_ABS_X, 3, "nop", 4, Absolute_X),
+    op(NOP_5C_ABS_X, 3, "nop", 5, Absolute_X),
     op(EOR_ABS_X, 3, "EOR", 4, Absolute_X),
     op(LSR_ABS_X, 3, "LSR", 7, Absolute_X),
     op(SRE_ABS_X, 3, "sre", 7, Absolute_X),
@@ -506,7 +503,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(RRA_ZP, 2, "rra", 5, Zp),
     op(PLA, 1, "PLA", 4, Unknown),
     op(ADC_IMM, 2, "ADC", 2, Immediate),
-    op(ROR, 1, "ROR", 2, Register_A),
+    op(ROR, 1, "ROR A", 2, Register_A),
     op(ARR_IMM, 2, "arr", 2, Immediate),
     op(JMP_IND, 3, "JMP", 5, Indirect),
     op(ADC_ABS, 3, "ADC", 4, Absolute),
@@ -521,25 +518,25 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(NOP_18, 2, "nop", 4, Zp_X),
     op(ADC_ZP_X, 2, "ADC", 4, Zp_X),
     op(ROR_ZP_X, 2, "ROR", 6, Zp_X),
-    op(RRA_ZP_X, 1, "rra", 1, Zp),
+    op(RRA_ZP_X, 2, "rra", 1, Zp_X),
     op(SEI, 1, "SEI", 2, Unknown),
     op(ADC_ABS_Y, 3, "ADC", 4, Absolute_Y),
     op(NOP_7A_ABS_X, 1, "nop", 2, Unknown),
     op(RRA_ABS_Y, 3, "rra", 7, Absolute_Y),
-    op(NOP_7C_ABS_X, 3, "nop", 4, Absolute_X),
+    op(NOP_7C_ABS_X, 3, "nop", 5, Absolute_X),
     op(ADC_ABS_X, 3, "ADC", 4, Absolute_X),
     op(ROR_ABS_X, 3, "ROR", 7, Absolute_X),
     op(RRA_ABS_X, 3, "rra", 7, Absolute_X),
 
     // 80-8f
-    op(NOP_7, 2, "nop", 2, Immediate),
+    op(NOP_7, 2, "nop", 1, Immediate),
     op(STA_IND_X, 2, "STA", 6, Indirect_X),
     op(NOP_8, 2, "nop", 2, Immediate),
     op(SAX_IND_X, 2, "sax", 6, Indirect_X),
     op(STY_ZP, 2, "STY", 3, Zp),
     op(STA_ZP, 2, "STA", 3, Zp),
     op(STX_ZP, 2, "STX", 3, Zp),
-    op(SMB0_ZP_65C02, 2, "SMB0", 5, Zp),
+    op(SAX_ZP, 2, "sax", 5, Zp),
     op(DEY, 1, "DEY", 2, Unknown),
     op(NOP_9, 2, "nop", 2, Immediate),
     op(TXA, 1, "TXA", 2, Unknown),
@@ -557,7 +554,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(STY_ZP_X, 2, "STY", 4, Zp_X),
     op(STA_ZP_X, 2, "STA", 4, Zp_X),
     op(STX_ZP_Y, 2, "STX", 4, Zp_Y),
-    op(SAX_ZP_Y, 1, "sax", 1, Zp),
+    op(SAX_ZP_Y, 2, "sax", 4, Zp_Y),
     op(TYA, 1, "TYA", 2, Unknown),
     op(STA_ABS_Y, 3, "STA", 5, Absolute_Y),
     op(TXS, 1, "TXS", 2, Unknown),
@@ -565,7 +562,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(SHY_ABS_X, 3, "shy", 5, Absolute_X),
     op(STA_ABS_X, 3, "STA", 5, Absolute_X),
     op(SHX_ABS_X, 3, "shx", 5, Absolute_X),
-    op(SHA_IND_Y, 2, "sha", 5, Indirect_Y),
+    op(SHA_IND_Y, 3, "sha", 5, Indirect_Y),
 
     // a0-af
     op(LDY_IMM, 2, "LDY", 2, Immediate),
@@ -575,7 +572,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(LDY_ZP, 2, "LDY", 3, Zp),
     op(LDA_ZP, 2, "LDA", 3, Zp),
     op(LDX_ZP, 2, "LDX", 3, Zp),
-    op(SMB2_ZP_65C02, 2, "SMB2", 5, Zp),
+    op(LAX_ZP, 2, "LAX", 5, Zp),
     op(TAY, 1, "TAY", 2, Unknown),
     op(LDA_IMM, 2, "LDA", 2, Immediate),
     op(TAX, 1, "TAX", 2, Unknown),
@@ -593,7 +590,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(LDY_ZP_X, 2, "LDY", 4, Zp_X),
     op(LDA_ZP_X, 2, "LDA", 4, Zp_X),
     op(LDX_ZP_Y, 2, "LDX", 4, Zp_Y),
-    op(LAX_ZP_Y, 1, "lax", 1, Zp),
+    op(LAX_ZP_Y, 2, "lax", 4, Zp_Y),
     op(CLV, 1, "CLV", 2, Unknown),
     op(LDA_ABS_Y, 3, "LDA", 4, Absolute_Y),
     op(TSX, 1, "TSX", 2, Unknown),
@@ -611,7 +608,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(CPY_ZP, 2, "CPY", 3, Zp),
     op(CMP_ZP, 2, "CMP", 3, Zp),
     op(DEC_ZP, 2, "DEC", 5, Zp),
-    op(SMB4_ZP_65C02, 2, "SMB4", 5, Zp),
+    op(DCP_ZP, 2, "DCP", 5, Zp),
     op(INY, 1, "INY", 2, Unknown),
     op(CMP_IMM, 2, "CMP", 2, Immediate),
     op(DEX, 1, "DEX", 2, Unknown),
@@ -619,7 +616,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(CPY_ABS, 3, "CPY", 4, Absolute),
     op(CMP_ABS, 3, "CMP", 4, Absolute),
     op(DEC_ABS, 3, "DEC", 6, Absolute),
-    op(LAX_ABS_Y, 3, "lax", 4, Absolute_Y),
+    op(DCP_ABS, 3, "dcp", 6, Absolute),
 
     // d0-df
     op(BNE, 2, "BNE", 2, Relative),
@@ -629,51 +626,51 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(NOP_19, 2, "nop", 4, Zp_X),
     op(CMP_ZP_X, 2, "CMP", 4, Zp_X),
     op(DEC_ZP_X, 2, "DEC", 6, Zp_X),
-    op(DCP_ZP_X, 1, "nop", 1, Zp),
+    op(DCP_ZP_X, 2, "dcp", 6, Zp_X),
     op(CLD, 1, "CLD", 2, Unknown),
     op(CMP_ABS_Y, 3, "CMP", 4, Absolute_Y),
-    op(0xda, 1, "nop", 2, Unknown),
+    op(NOP_5, 1, "nop", 2, Unknown),
     op(DCP_ABS_Y, 3, "DCP", 7, Absolute_Y),
-    op(NOP_DC_ABS_X, 3, "nop", 4, Absolute_X),
+    op(NOP_DC_ABS_X, 3, "nop", 5, Absolute_X),
     op(CMP_ABS_X, 3, "CMP", 4, Absolute_X),
     op(DEC_ABS_X, 3, "DEC", 7, Absolute_X),
     op(DCP_ABS_X, 3, "DCP", 7, Absolute_X),
 
-    // e0-ea
+    // e0-ef
     op(CPX_IMM, 2, "CPX", 2, Immediate),
     op(SBC_IND_X, 2, "SBC", 6, Indirect_X),
     op(NOP_11, 2, "nop", 2, Immediate),
-    op(ISC_IND_X, 2, "isc", 8, Indirect_X),
+    op(ISC_IND_X, 2, "isb", 8, Indirect_X),
     op(CPX_ZP, 2, "CPX", 3, Zp),
     op(SBC_ZP, 2, "SBC", 3, Zp),
     op(INC_ZP, 2, "INC", 5, Zp),
-    op(ISC_ZP, 1, "nop", 1, Zp),
+    op(ISC_ZP, 2, "isb", 5, Zp),
     op(INX, 1, "INX", 2, Unknown),
     op(SBC_IMM, 2, "SBC", 2, Immediate),
     op(NOP, 1, "NOP", 2, Unknown),
-    op(USBC_IMM, 2, "usbc", 2, Unknown),
+    op(USBC_IMM, 2, "sbc", 2, Immediate),
     op(CPX_ABS, 3, "CPX", 4, Absolute),
     op(SBC_ABS, 3, "SBC", 4, Absolute),
     op(INC_ABS, 3, "INC", 6, Absolute),
-    op(ISC_ABS, 3, "isc", 6, Absolute),
+    op(ISC_ABS, 3, "isb", 6, Absolute),
 
     // f0-ff
     op(BEQ, 2, "BEQ", 2, Relative),
     op(SBC_IND_Y, 2, "SBC", 5, Indirect_Y),
     op(JAM_F, 0, "JAM", 3, Zpi),
-    op(ISC_IND_Y, 2, "isc", 8, Indirect_Y),
+    op(ISC_IND_Y, 2, "isb", 8, Indirect_Y),
     op(NOP_20, 2, "nop", 4, Zp_X),
     op(SBC_ZP_X, 2, "SBC", 4, Zp_X),
     op(INC_ZP_X, 2, "INC", 6, Zp_X),
-    op(ISC_ZP_X, 1, "nop", 1, Zp),
+    op(ISC_ZP_X, 2, "isb", 6, Zp_X),
     op(SED, 1, "SED", 2, Unknown),
     op(SBC_ABS_Y, 3, "SBC", 4, Absolute_Y),
-    op(NOP_6, 1, "nop", 2, Unknown),
-    op(ISC_ABS_Y, 3, "isc", 7, Absolute_Y),
-    op(NOP_FC_ABS_X, 3, "nop", 4, Absolute_X),
+    op(NOP_6, 1, "nop", 1, Unknown),
+    op(ISC_ABS_Y, 3, "isb", 7, Absolute_Y),
+    op(NOP_FC_ABS_X, 3, "nop", 5, Absolute_X),
     op(SBC_ABS_X, 3, "SBC", 4, Absolute_X),
     op(INC_ABS_X, 3, "INC", 7, Absolute_X),
-    op(ISC_ABS_X, 3, "isc", 7, Absolute_X),
+    op(ISC_ABS_X, 3, "isb", 7, Absolute_X),
 ];
 
 pub const OPERANDS_65C02: [Operand; 256] = [
@@ -710,7 +707,7 @@ pub const OPERANDS_65C02: [Operand; 256] = [
     op(ORA_ABS_Y, 3, "ORA", 4, Absolute_Y),
     op(DEC_65C02, 1, "DEC", 2, Register_A),
     op(NOP_1B_65C02, 1, "nop", 1, Zp),
-    op(TRB_ABS_65C02, 3, "TRB", 6, Absolute),
+    op(TRB_ABS_65C02, 3, "TRB", 6, Absolute_X),
     op(ORA_ABS_X, 3, "ORA", 4, Absolute_X),
     op(ASL_ABS_X, 3, "ASL", 6, Absolute_X),
     op(BBR_1_65C02, 3, "BBR1", 5, Zp_Relative),
@@ -885,7 +882,7 @@ pub const OPERANDS_65C02: [Operand; 256] = [
     op(LDY_ZP_X, 2, "LDY", 4, Zp_X),
     op(LDA_ZP_X, 2, "LDA", 4, Zp_X),
     op(LDX_ZP_Y, 2, "LDX", 4, Zp_Y),
-    op(SMB3_ZP_65C02, 2, "SMB3", 5, Zp),
+    op(LAX_ZP_Y, 2, "LAX", 5, Zp_Y),
     op(CLV, 1, "CLV", 2, Unknown),
     op(LDA_ABS_Y, 3, "LDA", 4, Absolute_Y),
     op(TSX, 1, "TSX", 2, Unknown),
@@ -903,7 +900,7 @@ pub const OPERANDS_65C02: [Operand; 256] = [
     op(CPY_ZP, 2, "CPY", 3, Zp),
     op(CMP_ZP, 2, "CMP", 3, Zp),
     op(DEC_ZP, 2, "CMP", 3, Zp),
-    op(SMB4_ZP_65C02, 2, "SMB4", 5, Zp),
+    op(DCP_ZP, 2, "DCP", 5, Zp),
     op(INY, 1, "INY", 2, Unknown),
     op(CMP_IMM, 2, "CMP", 2, Immediate),
     op(DEX, 1, "DEX", 2, Unknown),
@@ -924,7 +921,7 @@ pub const OPERANDS_65C02: [Operand; 256] = [
     op(SMB5_ZP_65C02, 2, "SMB5", 5, Zp),
     op(CLD, 1, "CLD", 2, Unknown),
     op(CMP_ABS_Y, 3, "CMP", 4, Absolute_Y),
-    op(PHX_65C02, 1, "PHX", 3, Unknown),
+    op(NOP_5, 1, "nop", 1, Unknown),
     op(STP_65C02, 2, "STP", 1, Unknown),
     op(NOP_DC_ABS_X, 3, "nop", 4, Absolute_X),
     op(CMP_ABS_X, 3, "CMP", 4, Absolute_X),
@@ -935,19 +932,39 @@ pub const OPERANDS_65C02: [Operand; 256] = [
     op(CPX_IMM, 2, "CPX", 2, Immediate),
     op(SBC_IND_X, 2, "SBC", 6, Indirect_X),
     op(NOP_E2_65C02, 2, "nop", 2, Immediate),
-    op(NOP_E3_65C02, 1, "nop", 1, Unknown),
+    op(ISC_IND_X, 2, "isc", 8, Unknown),
     op(CPX_ZP, 2, "CPX", 3, Zp),
     op(SBC_ZP, 2, "SBC", 3, Zp),
     op(INC_ZP, 2, "INC", 5, Zp),
-    op(SMB6_ZP_65C02, 2, "SMB6", 5, Zp),
+    op(ISC_ZP, 2, "SMB6", 5, Zp),
     op(INX, 1, "INX", 2, Unknown),
-    op(SBC_IMM, 2, "SBC", 2, Immediate),
-    op(NOP, 1, "NOP", 2, Unknown),
-    op(NOP_EB_65C02, 1, "nop", 1, Zp),
-    op(CPX_ABS, 3, "CPX", 4, Absolute),
+    op(SBC_IMM, 2, "SBC", 2, Immediate), // 9
+    op(NOP, 1, "NOP", 2, Unknown), //a
+    op(NOP_EB_65C02, 1, "nop", 1, Zp), // b
+    op(CPX_ABS, 3, "CPX", 4, Absolute), // c
     op(SBC_ABS, 3, "SBC", 4, Absolute),
     op(INC_ABS, 3, "INC", 6, Absolute),
-    op(BBS_6_65C02, 3, "BBS6", 5, Zp_Relative),
+    op(ISC_ABS, 3, "BBS6", 5, Absolute),
+
+
+    // pub const CPX_IMM: u8 = 0xe0;
+    // pub const SBC_IND_X: u8 = 0xe1;
+    // pub const NOP_E2_65C02: u8 = 0xe2;
+    // pub const ISC_IND_X: u8 = 0xe3;
+    // pub const CPX_ZP: u8 = 0xe4;
+    // pub const SBC_ZP: u8 = 0xe5;
+    // pub const INC_ZP: u8 = 0xe6;
+    // pub const ISC_ZP: u8 = 0xe7;
+    // pub const INX: u8 = 0xe8;
+    // pub const SBC_IMM: u8 = 0xe9;
+    // pub const NOP: u8 = 0xea;
+    // pub const USBC_IMM: u8 = 0xeb;
+    // pub const NOP_EB_65C02: u8 = 0xeb;
+    // pub const CPX_ABS: u8 = 0xec;
+    // pub const SBC_ABS: u8 = 0xed;
+    // pub const INC_ABS: u8 = 0xee;
+    // pub const BBS_6_65C02: u8 = 0xef;
+    // pub const ISC_ABS: u8 = 0xef;
 
     // f0-ff
     op(BEQ, 2, "BEQ", 2, Relative),
@@ -974,11 +991,10 @@ const fn op(opcode: u8, size: u8, name: &'static str, cycles: u8,
 }
 
 /// http://6502.org/tutorials/65c02opcodes.html
-pub const OPCODES_65C02: [u8; 46] = [
+pub const OPCODES_65C02: [u8; 44] = [
     0x04, 0x0c,
     0x72, 0x32, 0x32, 0x52, 0x12, 0xf2, 0x92,
     0x7c,
-    0x04, 0x0c,
     0xf, 0x1f, 0x2f, 0x3f, 0x4f, 0x5f, 0x6f, 0x7f, 0x8f, 0x9f, 0xaf, 0xbf, 0xcf, 0xdf, 0xef, 0xff,
     0x7, 0x17, 0x27, 0x37, 0x47, 0x57, 0x67, 0x77, 0x87, 0x97, 0xa7, 0xb7, 0xc7, 0xd7, 0xe7, 0xf7,
     0xdb,

@@ -7,6 +7,7 @@ use tracing_appender::non_blocking;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use crate::mesen_logger::{LOG_CYCLE, LOG_SCANLINE};
 
 pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGuard> {
     use tracing_subscriber::EnvFilter;
@@ -39,10 +40,11 @@ pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGua
                 let _h = CURRENT_CYCLE.read().unwrap();
                 write!(writer, "{fields_buf}\n")
             } else {
+                let a = *LOG_CYCLE.read().unwrap();
                 write!(writer, "{}:{} - {:03},{:03} - {}\n",
                     metadata.level(), metadata.target(),
-                    *CURRENT_CYCLE.read().unwrap(),
-                    *CURRENT_SCANLINE.read().unwrap(),
+                    *LOG_CYCLE.read().unwrap(),
+                    *LOG_SCANLINE.read().unwrap(),
                     fields_buf)
             }
         }

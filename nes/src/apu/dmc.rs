@@ -8,30 +8,30 @@ use crate::nes_memory::NesMemory;
 #[derive(Clone, Default)]
 pub struct Dmc {
     // $4010
-    pub irq_enabled: bool,
-    pub loop_enabled: bool,
-    pub rate_index: usize,
-    pub rate: u16,
-    pub current_rate: u16,
+    irq_enabled: bool,
+    loop_enabled: bool,
+    rate_index: usize,
+    rate: u16,
+    current_rate: u16,
 
     // $4011
-    pub output: u8, // 7-bit
+    output: u8, // 7-bit
 
     // $4012
-    pub sample_address: u16,
+    sample_address: u16,
 
     // $4013
-    pub sample_length: u16,
+    sample_length: u16,
 
     // Internal state
-    pub current_address: u16,
-    pub current_length: u16,
+    current_address: u16,
+    current_length: u16,
 
     /// The current sample being shifted
-    pub sample_buffer: Option<u8>,
-    pub shift_register: u8,
-    pub bits_remaining: u8, // 0-8
-    pub silence_flag: bool,
+    sample_buffer: Option<u8>,
+    shift_register: u8,
+    bits_remaining: u8, // 0-8
+    silence_flag: bool,
 
     pub irq_flag: bool,
 }

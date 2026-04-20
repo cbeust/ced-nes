@@ -7,7 +7,7 @@ use rayon::iter::ParallelIterator;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use tracing::info;
+use tracing::{debug, info};
 use walkdir::WalkDir;
 
 pub fn create_rom_item(is_selected: bool, item: RomInfo) -> Element<'static, Message> {
@@ -127,7 +127,7 @@ pub fn find_roms_with_mappers(path: &str, mappers: Vec<u8>) -> Vec<RomInfo> {
         id += 1;
     }
 
-    info!("Found {} ROMs for mappers [{}]", result.len(),
+    debug!("Found {} ROMs for mappers [{}]", result.len(),
         mappers.iter().map(|m| format!("{}", m)).collect::<Vec<String>>().join(", "));
     result
 }

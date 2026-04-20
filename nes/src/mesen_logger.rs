@@ -71,7 +71,8 @@ impl IExternalLogger for MesenLogger {
 
         let cs = *LOG_SCANLINE.read().unwrap();
         let v = if cs == 261 { -1 } else { cs as i16 };
-        let beam = format!("V:{v:<3} H:{:<3}", *LOG_CYCLE.read().unwrap());
+        let h = *LOG_CYCLE.read().unwrap();
+        let beam = format!("V:{v:<3} H:{:<3}", h);
 
         self.count += 1;
 

@@ -3,26 +3,20 @@ mod pulse;
 mod triangle;
 mod noise;
 mod dmc;
+mod apu_rodio;
 
 use self::noise::Noise;
 use self::pulse::Pulse;
 use self::triangle::Triangle;
 use self::FrameCounterMode::{Step4, Step5};
-use rodio::source::Source;
-use rodio::{nz, ChannelCount, DeviceSinkBuilder, SampleRate};
-use std::collections::VecDeque;
-use std::num::NonZero;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use crossbeam_queue::ArrayQueue;
+use crate::apu::apu_rodio::{create_buffer, OUTPUT_SAMPLE_RATE};
 use crate::apu::dmc::Dmc;
 use crate::nes_memory::NesMemory;
 
-// length counter lookup table
-const LENGTH_TABLE: [u8; 32] = [
-    10, 254, 20,  2, 40,  4, 80,  6, 160,  8, 60, 10, 14, 12, 26, 14,
-    12,  16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
-];
-
-
+const CPU_CLOCK_HZ: f32 = 1_789_773.0;
+const AUDIO_THROTTLE_TARGET_SAMPLES: usize = (OUTPUT_SAMPLE_RATE as usize) / 10;
 
 #[derive(Clone)]
 enum FrameCounterMode {
@@ -32,7 +26,7 @@ enum FrameCounterMode {
 
 #[derive(Clone)]
 pub struct Apu {
-    buffer: Arc<Mutex<VecDeque<f32>>>,
+    buffer: Arc<ArrayQueue<f32>>,
     local_buffer: Vec<f32>,
     _stream: Arc<dyn Send + Sync>,
     _player: Arc<rodio::Player>,
@@ -46,8 +40,6 @@ pub struct Apu {
     frame_counter_mode: FrameCounterMode,
     frame_counter: u32,
     cycle_count: u64,
-    sample_accumulator: f32,
-    last_sample: f32,
     frame_irq_inhibit: bool,
 
     gui_pulse1_enabled: bool,
@@ -55,6 +47,8 @@ pub struct Apu {
     gui_triangle_enabled: bool,
     gui_noise_enabled: bool,
     gui_dmc_enabled: bool,
+
+    audio_sampler: AudioSampler,
 }
 
 impl Apu {
@@ -74,8 +68,6 @@ impl Apu {
             frame_counter_mode: Step4,
             frame_counter: 0,
             cycle_count: 0,
-            sample_accumulator: 0.0,
-            last_sample: 0.0,
             frame_irq_inhibit: false,
 
             gui_pulse1_enabled: true,
@@ -83,6 +75,7 @@ impl Apu {
             gui_triangle_enabled: true,
             gui_noise_enabled: true,
             gui_dmc_enabled: true,
+            audio_sampler: AudioSampler::new(CPU_CLOCK_HZ, OUTPUT_SAMPLE_RATE),
         }
     }
 
@@ -172,56 +165,63 @@ impl Apu {
             self.pulse2.clock_timer();
             self.noise.clock_timer();
         }
+        let mixed = self.calculate_output_sample().clamp(-1.0, 1.0);
+        if let Some(sample) = self.audio_sampler.clock(mixed) {
+            self.local_buffer.push(sample);
 
-
-        // mix channels and generate sample
-        // we don't output every cycle, just sample periodically
-        // CPU 1.789773 MHz / 44100 Hz = 40.5844 cycles per sample
-        // Using an accumulator to handle the fractional cycle count
-        self.sample_accumulator += 1.0;
-        if self.sample_accumulator >= 40.5844 {
-            self.sample_accumulator -= 40.5844;
-            let p1 = if self.gui_pulse1_enabled { self.pulse1.output() } else { 0 };
-            let p2 = if self.gui_pulse2_enabled { self.pulse2.output() } else { 0 };
-            let tri = if self.gui_triangle_enabled { self.triangle.output() } else { 0 };
-            let noise = if self.gui_noise_enabled { self.noise.output() } else { 0 };
-            let dmc = if self.gui_dmc_enabled { self.dmc.output() } else { 0 };
-
-            // Mixing formula from NESdev Wiki
-            let pulse_out = if p1 + p2 > 0 {
-                95.88 / ((8128.0 / (p1 as f32 + p2 as f32)) + 100.0)
-            } else {
-                0.0
-            };
-
-            let tnd_denom = tri as f32 / 8227.0 + noise as f32 / 12241.0 + dmc as f32 / 22638.0;
-            let tnd_out = if tnd_denom > 0.0 {
-                159.79 / ((1.0 / tnd_denom) + 100.0)
-            } else {
-                0.0
-            };
-
-            let s = (pulse_out + tnd_out) / 2.0;
-            self.last_sample = s;
-
-            // Push to local buffer instead of shared buffer immediately
-            self.local_buffer.push(s);
-
-            // self.buffer.lock().unwrap().push_back(s);
+            // Keep the device queue bounded: on overflow, drop the oldest queued sample.
+            if self.buffer.push(sample).is_err() {
+                let _ = self.buffer.pop();
+                let _ = self.buffer.push(sample);
+            }
         }
     }
 
-    /// Called at the end of each frame to send samples to the audio device
-    pub fn flush_samples(&mut self) {
-        if self.local_buffer.is_empty() {
-            return;
-        }
+    pub fn audio_queue_depth(&self) -> usize {
+        self.buffer.len()
+    }
 
-        self.buffer.lock().unwrap().extend(self.local_buffer.drain(..));
+    pub fn can_sleep_for_video_throttle(&self) -> bool {
+        self.audio_queue_depth() >= AUDIO_THROTTLE_TARGET_SAMPLES
+    }
+
+    fn calculate_output_sample(&self) -> f32 {
+        let p1 = if self.gui_pulse1_enabled { self.pulse1.output() } else { 0 };
+        let p2 = if self.gui_pulse2_enabled { self.pulse2.output() } else { 0 };
+        let triangle = if self.gui_triangle_enabled { self.triangle.output() } else { 0 };
+        let noise = if self.gui_noise_enabled { self.noise.output() } else { 0 };
+        let dmc = if self.gui_dmc_enabled { self.dmc.output() } else { 0 };
+
+        // Mixing formula from NESdev Wiki
+        let pulse_out = if p1 + p2 > 0 {
+            95.88 / ((8128.0 / (p1 as f32 + p2 as f32)) + 100.0)
+        } else {
+            0.0
+        };
+
+        let tnd_denom = triangle as f32 / 8227.0 + noise as f32 / 12241.0 + dmc as f32 / 22638.0;
+        let tnd_out = if tnd_denom > 0.0 {
+            159.79 / ((1.0 / tnd_denom) + 100.0)
+        } else {
+            0.0
+        };
+
+        (pulse_out + tnd_out) / 2.0
+    }
+
+    /// Called at the end of each frame to expose samples to the UI/debug path.
+    pub fn flush_samples(&mut self) -> Vec<f32> {
+        if self.local_buffer.is_empty() {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.local_buffer)
     }
 
     pub fn set(&mut self, addr: u16, val: u8) {
         match addr {
+            //
+            // Registers
+            //
             0x4000..=0x4003 => { self.pulse1.set(addr, val); }
             0x4004..=0x4007 => { self.pulse2.set(addr, val); }
             0x4008..=0x400b => { self.triangle.set(addr, val); }
@@ -303,65 +303,52 @@ impl Apu {
     }
 }
 
-//
-// rodio details
-//
+// Length counter lookup table
+const LENGTH_TABLE: [u8; 32] = [
+    10, 254, 20,  2, 40,  4, 80,  6, 160,  8, 60, 10, 14, 12, 26, 14,
+    12,  16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
+];
 
-pub struct ApuSource {
-    buffer: Arc<Mutex<VecDeque<f32>>>,
-    sample_rate: u32,
-    last_sample: f32,
+#[derive(Clone)]
+pub struct AudioSampler {
+    accumulator: f32,
+    sample_count: u32,
+    cycles_per_sample: f32,
+    cycle_counter: f32,
 }
 
-impl ApuSource {
-    pub fn new(buffer: Arc<Mutex<VecDeque<f32>>>, sample_rate: u32) -> Self {
-        Self { buffer, sample_rate, last_sample: 0.0 }
-    }
-}
-
-impl Iterator for ApuSource {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<f32> {
-        let mut buf = self.buffer.lock().unwrap();
-        // If buffer is empty, return the last sample to reduce sharp pops
-        if let Some(s) = buf.pop_front() {
-            self.last_sample = s;
+impl AudioSampler {
+    pub fn new(cpu_clock_hz: f32, output_sample_rate: u32) -> Self {
+        Self {
+            accumulator: 0.0,
+            sample_count: 0,
+            cycles_per_sample: cpu_clock_hz / output_sample_rate as f32,
+            cycle_counter: 0.0,
         }
-        Some(self.last_sample)
     }
-}
 
-impl Source for ApuSource {
-    fn current_span_len(&self) -> Option<usize> { None }
-    fn channels(&self) -> ChannelCount { nz!(1) }
-    fn sample_rate(&self) -> SampleRate { NonZero::new(self.sample_rate).unwrap() }
-    fn total_duration(&self) -> Option<std::time::Duration> { None }
-}
+    /// Call this every CPU cycle with the current APU output value.
+    /// Returns Some(sample) when it's time to emit a sample, None otherwise.
+    pub fn clock(&mut self, apu_output: f32) -> Option<f32> {
+        self.accumulator += apu_output;
+        self.sample_count += 1;
+        self.cycle_counter += 1.0;
 
-pub fn create_buffer() -> (Arc<Mutex<VecDeque<f32>>>, Box<dyn Send + Sync>, rodio::Player) {
-    let stream = DeviceSinkBuilder::open_default_sink().unwrap();
-    let player = rodio::Player::connect_new(stream.mixer());
+        if self.cycle_counter >= self.cycles_per_sample {
+            self.cycle_counter -= self.cycles_per_sample;
 
-    let buffer: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
-    let sample_rate = 44100;
-    let source = ApuSource::new(Arc::clone(&buffer), sample_rate);
-    player.append(source);
-    player.play();
+            let sample = if self.sample_count > 0 {
+                self.accumulator / self.sample_count as f32
+            } else {
+                0.0
+            };
 
-    // Your emulator loop pushes samples like:
-    // buffer.lock().unwrap().push_back(sample);
+            self.accumulator = 0.0;
+            self.sample_count = 0;
 
-    // let freq = 440.0;
-    // let mut phase: f32 = 0.0;
-    // let phase_inc = 2.0 * std::f32::consts::PI * freq / sample_rate as f32;
-    //
-    // for _ in 0..sample_rate * 5 {
-    //     let sample = phase.sin();
-    //     buffer.lock().unwrap().push_back(sample);
-    //     phase = (phase + phase_inc) % (2.0 * std::f32::consts::PI);
-    // }
-
-    (buffer, Box::new(stream), player)
-    // std::thread::sleep(std::time::Duration::from_secs(1));
+            Some(sample)
+        } else {
+            None
+        }
+    }
 }

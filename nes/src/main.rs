@@ -39,7 +39,7 @@ use tracing::debug;
 pub struct Args {
     /// Path of the rom
     #[arg(long)]
-    rom_name: Option<String>,
+    rom: Option<String>,
 
     /// Directory containing ROM files.
     #[arg(long)]
@@ -51,24 +51,28 @@ pub struct Args {
 
     /// Number of the rom to launch (dev mode only)
     #[arg(long)]
-    rom: Option<usize>,
+    rom_number: Option<usize>,
 
     #[arg(long)]
     demo: bool,
 
     #[arg(long)]
     dev: bool,
+
+    #[arg(long)]
+    pc: Option<String>,
 }
 
 impl Clone for Args {
     fn clone(&self) -> Self {
         Self {
-            rom_name: None,
+            rom: None,
             rom_dir: self.rom_dir.clone(),
             rom_names: self.rom_names.clone(),
-            rom: None,
+            rom_number: None,
             demo: false,
             dev: false,
+            pc: self.pc.clone(),
         }
     }
 }
@@ -123,7 +127,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Log the parsed ROM IDs
     let rom_info = {
         let index2 =
-            if let Some(index) = &args.rom {
+            if let Some(index) = &args.rom_number {
                 index
             } else {
                 &SELECTED_ROM
@@ -134,7 +138,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.rom_names.is_empty() {
             args.rom_names.push(roms[index].file_name.clone());
         }
-        if let Some(name) = &args.rom_name {
+        if let Some(name) = &args.rom {
             RomInfo::n(0, name)
         } else {
             roms[index].clone()

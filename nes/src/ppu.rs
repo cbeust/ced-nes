@@ -63,7 +63,7 @@ impl Default for Ppu {
     fn default() -> Self {
         Self {
             scanline: 0,
-            cycle: 25,
+            cycle: 19,
             rom: Rom::default(),
             palette_table: [0; 32],
             oam: [0; 256],
