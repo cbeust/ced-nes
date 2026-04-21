@@ -82,19 +82,5 @@ pub fn create_buffer() -> (Arc<ArrayQueue<f32>>, Box<dyn Send + Sync>, rodio::Pl
     player.append(source);
     player.play();
 
-    // Your emulator loop pushes samples like:
-    // buffer.lock().unwrap().push_back(sample);
-
-    // let freq = 440.0;
-    // let mut phase: f32 = 0.0;
-    // let phase_inc = 2.0 * std::f32::consts::PI * freq / sample_rate as f32;
-    //
-    // for _ in 0..sample_rate * 5 {
-    //     let sample = phase.sin();
-    //     buffer.lock().unwrap().push_back(sample);
-    //     phase = (phase + phase_inc) % (2.0 * std::f32::consts::PI);
-    // }
-
     (buffer, Box::new(stream), player)
-    // std::thread::sleep(std::time::Duration::from_secs(1));
 }

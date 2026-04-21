@@ -236,7 +236,7 @@ impl NesMemory{
 
                 }
                 0x4015 => {
-                    result = self.apu.read().unwrap().get(address);
+                    result = self.apu.write().unwrap().get(address);
                 }
 
                 // Joypad

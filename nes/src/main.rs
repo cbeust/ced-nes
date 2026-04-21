@@ -38,7 +38,7 @@ use tracing::debug;
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// Path of the rom
-    #[arg(long)]
+    #[arg(short, long)]
     rom: Option<String>,
 
     /// Directory containing ROM files.

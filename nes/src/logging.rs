@@ -40,7 +40,6 @@ pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGua
                 let _h = CURRENT_CYCLE.read().unwrap();
                 write!(writer, "{fields_buf}\n")
             } else {
-                let a = *LOG_CYCLE.read().unwrap();
                 write!(writer, "{}:{} - {:03},{:03} - {}\n",
                     metadata.level(), metadata.target(),
                     *LOG_CYCLE.read().unwrap(),

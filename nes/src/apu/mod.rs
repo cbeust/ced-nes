@@ -11,6 +11,8 @@ use self::triangle::Triangle;
 use self::FrameCounterMode::{Step4, Step5};
 use std::sync::Arc;
 use crossbeam_queue::ArrayQueue;
+use tracing::info;
+use cpu::cpu2::CYCLES;
 use crate::apu::apu_rodio::{create_buffer, OUTPUT_SAMPLE_RATE};
 use crate::apu::dmc::Dmc;
 use crate::nes_memory::NesMemory;
@@ -39,8 +41,10 @@ pub struct Apu {
     // frame counter
     frame_counter_mode: FrameCounterMode,
     frame_counter: u32,
+    irq_enabled: bool,
+    irq_enabled_needs_to_be_cleared: bool,
+    frame_counter_irq: bool,
     cycle_count: u64,
-    frame_irq_inhibit: bool,
 
     gui_pulse1_enabled: bool,
     gui_pulse2_enabled: bool,
@@ -49,6 +53,7 @@ pub struct Apu {
     gui_dmc_enabled: bool,
 
     audio_sampler: AudioSampler,
+    last_cycles: u128
 }
 
 impl Apu {
@@ -68,7 +73,9 @@ impl Apu {
             frame_counter_mode: Step4,
             frame_counter: 0,
             cycle_count: 0,
-            frame_irq_inhibit: false,
+            irq_enabled: true,
+            irq_enabled_needs_to_be_cleared: false,
+            frame_counter_irq: false,
 
             gui_pulse1_enabled: true,
             gui_pulse2_enabled: true,
@@ -76,6 +83,7 @@ impl Apu {
             gui_noise_enabled: true,
             gui_dmc_enabled: true,
             audio_sampler: AudioSampler::new(CPU_CLOCK_HZ, OUTPUT_SAMPLE_RATE),
+            last_cycles: 0,
         }
     }
 
@@ -113,10 +121,13 @@ impl Apu {
                 clock_env = true;
                 clock_len = true;
                 self.frame_counter = 0;
-                // TODO: Set IRQ flag if not inhibited
+                if self.irq_enabled {
+                    self.frame_counter_irq = true;
+                }
             }
         } else {
             // 5-step mode (48 Hz / 192 Hz)
+            self.irq_enabled = false;
             if self.frame_counter == 3729 {
                 clock_env = true;
             } else if self.frame_counter == 7457 {
@@ -147,7 +158,8 @@ impl Apu {
         }
     }
 
-    pub fn step(&mut self, memory: &mut NesMemory) {
+    /// Return true if IRQ
+    pub fn step(&mut self, memory: &mut NesMemory) -> bool {
         self.cycle_count += 1;
 
         // frame counter runs every cycle
@@ -156,7 +168,7 @@ impl Apu {
         // triangle timer clocks every CPU cycle
         self.triangle.step();
         // The DMC will actually not always step, depends on its rate
-        self.dmc.step(memory);
+        let result = self.dmc.step(memory);
 
         // pulse and noise timers clock every other CPU cycle (APU cycle)
         if self.cycle_count % 2 == 0 {
@@ -175,6 +187,8 @@ impl Apu {
                 let _ = self.buffer.push(sample);
             }
         }
+
+        result
     }
 
     pub fn audio_queue_depth(&self) -> usize {
@@ -242,7 +256,11 @@ impl Apu {
             // Frame counter
             0x4017 => {
                 self.frame_counter_mode = if (val & 0x80) == 0 { Step4 } else { Step5 };
-                self.frame_irq_inhibit = (val & 0x40) != 0;
+                self.irq_enabled = (val & 0x40) == 0;
+                if ! self.irq_enabled {
+                    // info!(target: "asm", "Write 4017={:02X}, disabling frame_counter_irq", val);
+                    self.frame_counter_irq = false;
+                }
                 self.frame_counter = 0;
 
                 // If Step5, the units are clocked immediately.
@@ -262,7 +280,7 @@ impl Apu {
         }
     }
 
-    pub fn get(&self, addr: u16) -> u8 {
+    pub fn get(&mut self, addr: u16) -> u8 {
         let mut result = 0;
 
         match addr {
@@ -274,12 +292,41 @@ impl Apu {
                 if self.triangle.length_counter > 0 { result |= 0x04; }
                 if self.noise.length_counter > 0 { result |= 0x08; }
                 if self.dmc.is_active() { result |= 0x10; }
-                if self.dmc.irq_flag { result |= 0x80; }
+                if self.frame_counter_irq & self.irq_enabled{ result |= 0x40; }
+                // if self.irq_enabled_needs_to_be_cleared {
+                //     result |= 0x40;
+                //     self.irq_enabled_needs_to_be_cleared = false;
+                // } else {
+                // }
+                if self.dmc.irq_flag && self.irq_enabled { result |= 0x80; }
+                info!(target: "asm",
+                    "Read 4015, disabling frame_counter_irq, status: {} val: {:02X} irq_enabled:{}",
+                        self.frame_counter_irq, result, self.irq_enabled);
+                self.frame_counter_irq = false;
+                // 	;;; Test 5 [APU Frame Counter IRQ]: Reading the IRQ flag clears the IRQ flag.
+                self.irq_enabled = false;
+                // if *CYCLES.read().unwrap() != self.last_cycles {
+                //     info!("1 IRQ needs_to_be_cleared = true");
+                //     self.irq_enabled_needs_to_be_cleared = true;
+                //     self.last_cycles = *CYCLES.read().unwrap();
+                // } else if self.irq_enabled_needs_to_be_cleared && *CYCLES.read().unwrap() == self.last_cycles {
+                //     self.irq_enabled = false;
+                //     self.irq_enabled_needs_to_be_cleared = false;
+                // } else if self.irq_enabled_needs_to_be_cleared {
+                //     self.irq_enabled_needs_to_be_cleared = false;
+                //     info!("3 Clearing now");
+                // }
+                // self.last_cycles = *CYCLES.read().unwrap();
+                info!("cycles:{}, Read [4015] result: {:02X}", *CYCLES.read().unwrap(), result)
             }
             _ => {}
         }
 
         result
+    }
+
+    pub fn set_irq_enabled(&mut self, enabled: bool) {
+        self.irq_enabled = enabled;
     }
 
     pub fn set_pulse1_enabled(&mut self, enabled: bool) {

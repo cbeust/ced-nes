@@ -4,6 +4,7 @@ use crate::emulator::{Emulator, FRAME};
 use crate::joypad::{Button, Joypad};
 use crate::rom_list::create_rom_item;
 use crate::Args;
+use gilrs::{Axis, Button as GilButton, EventType, Gilrs};
 use iced::alignment::Horizontal;
 use iced::keyboard::Key;
 use iced::mouse::Cursor;
@@ -64,6 +65,8 @@ impl Default for SharedState {
 // Then in your main code:
 
 impl App {
+    const STICK_DEADZONE: f32 = 0.25;
+
     pub fn new(args: Args,
         shared_state: Arc<RwLock<SharedState>>,
         roms: Vec<RomInfo>, selected_rom_index: Option<usize>,
@@ -691,6 +694,43 @@ impl App {
         result
     }
 
+    fn map_gilrs_button(button: GilButton) -> Option<Button> {
+        match button {
+            GilButton::South => Some(Button::A),
+            GilButton::East => Some(Button::B),
+            GilButton::Start => Some(Button::Start),
+            GilButton::Select => Some(Button::Select),
+            _ => None,
+        }
+    }
+
+    fn apply_stick_x(joypad: &mut Joypad, value: f32) {
+        if value > Self::STICK_DEADZONE {
+            joypad.set_button_status(Button::Right, true);
+            joypad.set_button_status(Button::Left, false);
+        } else if value < -Self::STICK_DEADZONE {
+            joypad.set_button_status(Button::Left, true);
+            joypad.set_button_status(Button::Right, false);
+        } else {
+            joypad.set_button_status(Button::Left, false);
+            joypad.set_button_status(Button::Right, false);
+        }
+    }
+
+    fn apply_stick_y(joypad: &mut Joypad, value: f32) {
+        // This controller reports positive Y for up.
+        if value > Self::STICK_DEADZONE {
+            joypad.set_button_status(Button::Up, true);
+            joypad.set_button_status(Button::Down, false);
+        } else if value < -Self::STICK_DEADZONE {
+            joypad.set_button_status(Button::Down, true);
+            joypad.set_button_status(Button::Up, false);
+        } else {
+            joypad.set_button_status(Button::Up, false);
+            joypad.set_button_status(Button::Down, false);
+        }
+    }
+
     fn key_pressed(&mut self, key: Key<SmolStr>) {
         // info!("Key pressed: {key:#?}");
         if let Some(button) = Self::key_to_button(key) {
@@ -720,6 +760,7 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
         .spawn(move|| {
         let mut reboot = false;
         let mut paused = false;
+        let mut gilrs = Gilrs::new().ok();
         loop {
             let mut emulator = Emulator::new(rom_info.clone(),
                 shared_state.clone(), joypad2.clone(), args.clone());
@@ -764,6 +805,32 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
                         }
                         ToEmulatorMessage::SoundDmc(enabled) => {
                             emulator.apu.write().unwrap().set_dmc_enabled(enabled);
+                        }
+                    }
+                }
+
+                if let Some(g) = gilrs.as_mut() {
+                    while let Some(event) = g.next_event() {
+                        match event.event {
+                            EventType::ButtonPressed(button, _) => {
+                                if let Some(mapped) = App::map_gilrs_button(button) {
+                                    joypad2.write().unwrap().set_button_status(mapped, true);
+                                }
+                            }
+                            EventType::ButtonReleased(button, _) => {
+                                if let Some(mapped) = App::map_gilrs_button(button) {
+                                    joypad2.write().unwrap().set_button_status(mapped, false);
+                                }
+                            }
+                            EventType::AxisChanged(Axis::LeftStickX, value, _) => {
+                                let mut joypad = joypad2.write().unwrap();
+                                App::apply_stick_x(&mut joypad, value);
+                            }
+                            EventType::AxisChanged(Axis::LeftStickY, value, _) => {
+                                let mut joypad = joypad2.write().unwrap();
+                                App::apply_stick_y(&mut joypad, value);
+                            }
+                            _ => {}
                         }
                     }
                 }

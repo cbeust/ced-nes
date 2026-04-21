@@ -28,10 +28,6 @@ pub struct FrameStat {
 
 pub static mut FRAME: [u8; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT];
 
-lazy_static! {
-    pub static ref CYCLES: Arc<RwLock<u128>> = Arc::new(RwLock::new(0));
-}
-
 enum CpuType {
     Old(Cpu<NesMemory>),
     New(Cpu2<NesMemory>),
@@ -287,7 +283,10 @@ impl Emulator {
         //
         // Tick the APU once
         //
-        self.apu.write().unwrap().step(self.cpu.memory());
+        let irq_requested = self.apu.write().unwrap().step(self.cpu.memory());
+        // if irq_requested {
+        //     self.cpu.irq();
+        // }
 
         //
         // Tick the CPU once

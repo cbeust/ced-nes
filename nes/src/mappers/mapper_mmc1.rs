@@ -1,5 +1,4 @@
 use crate::constants::{CPU_TYPE_NEW};
-use crate::emulator::CYCLES;
 use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_config::MapperConfig;
 use crate::nes_memory::NesMemory;
@@ -57,11 +56,11 @@ impl Mapper for MapperMMC1 {
         if address < 0x8000 { return; }
         if ! CPU_TYPE_NEW {
             // Ignore consecutive writes (e.g. INC)
-            let cycles = *CYCLES.read().unwrap();
-            if self.last_cycle_write == cycles {
-               return;
-            }
-            self.last_cycle_write = cycles;
+            // let cycles = *CYCLES.read().unwrap();
+            // if self.last_cycle_write == cycles {
+            //    return;
+            // }
+            // self.last_cycle_write = cycles;
         }
 
         // Reset if bit 7 set

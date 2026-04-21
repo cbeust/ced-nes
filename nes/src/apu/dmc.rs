@@ -1,3 +1,4 @@
+use tracing::info;
 use cpu::memory::Memory;
 use crate::nes_memory::NesMemory;
 
@@ -33,6 +34,9 @@ pub struct Dmc {
     bits_remaining: u8, // 0-8
     silence_flag: bool,
 
+    // Memory reader DMA timing: emulate a fixed fetch latency.
+    dma_delay: u8,
+
     pub irq_flag: bool,
 }
 
@@ -42,6 +46,7 @@ impl Dmc {
             0 => {
                 // $4010 - IL--.RRRR
                 self.irq_enabled = (val & 0x80) != 0;
+                info!(target: "asm", "Writing to $4010, DMC IRQ enabled={}", self.irq_enabled);
                 if !self.irq_enabled {
                     self.irq_flag = false;
                 }
@@ -71,6 +76,7 @@ impl Dmc {
     pub fn set_enabled(&mut self, enabled: bool) {
         if !enabled {
             self.current_length = 0;
+            self.dma_delay = 0;
         } else if self.current_length == 0 {
             self.current_address = self.sample_address;
             self.current_length = self.sample_length;
@@ -78,35 +84,45 @@ impl Dmc {
         self.irq_flag = false;
     }
 
-    fn fill_sample_buffer(&mut self, memory: &mut NesMemory) {
-        if self.sample_buffer.is_none() && self.current_length > 0 {
-            // TODO: CPU should stall for 4, 3, or 2 cycles
-            // From https://www.nesdev.org/wiki/DMA:
-            // DMC DMA halts the CPU, performs a dummy cycle and an optional alignment cycle,
-            // and then gets once, taking 3 or 4 cycles.
-            self.sample_buffer = Some(memory.get(self.current_address));
-
-            if self.current_address == 0xFFFF {
-                self.current_address = 0x8000;
-            } else {
-                self.current_address += 1;
+    fn clock_memory_reader(&mut self, memory: &mut NesMemory) {
+        if self.dma_delay > 0 {
+            self.dma_delay -= 1;
+            if self.dma_delay == 0 {
+                self.complete_sample_fetch(memory);
             }
+            return;
+        }
 
-            self.current_length -= 1;
-            if self.current_length == 0 {
-                if self.loop_enabled {
-                    self.current_address = self.sample_address;
-                    self.current_length = self.sample_length;
-                } else if self.irq_enabled {
-                    self.irq_flag = true;
-                }
+        if self.sample_buffer.is_none() && self.current_length > 0 {
+            // Approximate DMC DMA transfer delay before the byte becomes available.
+            self.dma_delay = 3;
+        }
+    }
+
+    fn complete_sample_fetch(&mut self, memory: &mut NesMemory) {
+        self.sample_buffer = Some(memory.get(self.current_address));
+
+        if self.current_address == 0xFFFF {
+            self.current_address = 0x8000;
+        } else {
+            self.current_address += 1;
+        }
+
+        self.current_length -= 1;
+        if self.current_length == 0 {
+            if self.loop_enabled {
+                self.current_address = self.sample_address;
+                self.current_length = self.sample_length;
+            } else if self.irq_enabled {
+                // IRQ is raised when the last DMA fetch completes.
+                self.irq_flag = true;
             }
         }
     }
 
-    pub fn step(&mut self, memory: &mut NesMemory) {
+    pub fn step(&mut self, memory: &mut NesMemory) -> bool {
         // 1. Memory Reader
-        self.fill_sample_buffer(memory);
+        self.clock_memory_reader(memory);
 
         // 2. Timer
         if self.current_rate > 0 {
@@ -143,6 +159,7 @@ impl Dmc {
                 }
             }
         }
+        self.irq_enabled && self.irq_flag
     }
 
     pub fn output(&self) -> u8 {
