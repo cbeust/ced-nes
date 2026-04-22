@@ -5,7 +5,8 @@
 <p align="center">A NES emulator written in Rust</p>
 </h3>
 
-<img width="1211" height="503" alt="image" src="https://github.com/user-attachments/assets/f63cf339-f0dd-4cfc-995e-ff37658feef2" />
+<img width="906" height="506" alt="image" src="https://github.com/user-attachments/assets/8a464853-3ab8-4ada-9828-29aa10e7ce54" />
+
 
 <p align="center">
 <img src="https://github.com/user-attachments/assets/8f71231c-8a7c-47ca-9d4b-ffb669c83ecb" width=40% />
@@ -14,9 +15,12 @@
 <img src="https://github.com/user-attachments/assets/f4b7df2c-64ac-42d9-91bf-e697707bd5e6" width=40% />
 </p>
 
-Full sound support (triangle, pulse 1, pulse 2, noise, DMC).
+# Features
 
-Mappers supported:
+- Full sound (triangle, pulse 1, pulse 2, noise, DMC), with visualization
+- Controller
+
+# Mappers supported
 
 - MMC1 (1)
 - UxROM (2)
@@ -27,4 +31,9 @@ Mappers supported:
 - Mapper 19 (19)
 - GxRom (66)
 
+# Launching
+
+```
+cargo run -r -- -r <rom>.nes
+```
 
