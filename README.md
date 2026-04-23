@@ -5,8 +5,7 @@
 <p align="center">A NES emulator written in Rust</p>
 </h3>
 
-<img width="906" height="506" alt="image" src="https://github.com/user-attachments/assets/8a464853-3ab8-4ada-9828-29aa10e7ce54" />
-
+<img width="1214" height="509" alt="image" src="https://github.com/user-attachments/assets/0a4abf12-9b1c-4c95-b9c0-2fa3ffaf9e8e" />
 
 <p align="center">
 <img src="https://github.com/user-attachments/assets/8f71231c-8a7c-47ca-9d4b-ffb669c83ecb" width=40% />
