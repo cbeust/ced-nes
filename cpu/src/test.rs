@@ -21,14 +21,14 @@ mod tests {
     }
 
     fn run_functional_tests(file: &str, is_65c02: bool, success_pc: u16) -> (bool, String) {
-        let config = Config {
+        let mut config = Config {
             debug_asm: true,
             is_65c02,
             ..Default::default()
         };
         let m = DefaultMemory::new_with_file(file);
         let now = Instant::now();
-        let mut cpu = Cpu::new(m, None, config.clone());
+        let mut cpu = Cpu::new(m, None, &config.clone(), None);
         let mut cycles = 128;
         cpu.pc = 0x400;
         let mut previous_pc = 0;
@@ -43,7 +43,7 @@ mod tests {
         let mut passed = false;
         let mut reason = "".to_string();
         while ! stop {
-            cpu.step(&config, &HashSet::new());
+            cpu.step(&mut config, &HashSet::new());
             match cpu.run_status {
                 Continue(c) => {
                     if cpu.pc == success_pc { // } || cpu.pc == 0x3469 {

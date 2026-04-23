@@ -12,7 +12,6 @@ use self::FrameCounterMode::{Step4, Step5};
 use std::sync::Arc;
 use crossbeam_queue::ArrayQueue;
 use tracing::info;
-use cpu::cpu2::CYCLES;
 use crate::apu::apu_rodio::{create_buffer, OUTPUT_SAMPLE_RATE};
 use crate::apu::dmc::Dmc;
 use crate::nes_memory::NesMemory;
@@ -317,7 +316,6 @@ impl Apu {
                 //     info!("3 Clearing now");
                 // }
                 // self.last_cycles = *CYCLES.read().unwrap();
-                info!("cycles:{}, Read [4015] result: {:02X}", *CYCLES.read().unwrap(), result)
             }
             _ => {}
         }
