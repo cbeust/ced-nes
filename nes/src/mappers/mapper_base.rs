@@ -186,7 +186,7 @@ impl MapperBase {
     pub fn write_chr(&mut self, addr: u16, data: u8) {
         if self.config.is_custom_chr {
             self.mapper.write_chr(addr, data);
-        } else {
+        } else if self.config.has_chr_ram {
             self.chr_ram[addr as usize] = data;
         }
     }

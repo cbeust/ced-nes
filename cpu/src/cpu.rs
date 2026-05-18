@@ -1375,4 +1375,9 @@ impl <T: Memory> Cpu<T> {
     pub fn irq(&mut self) {
         self.pending_interrupt = Some((0xffff, 0xfffe));
     }
+
+    pub fn pc(&self) -> u16 {
+        self.pc
+    }
+
 }

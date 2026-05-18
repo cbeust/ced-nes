@@ -5,11 +5,12 @@ use tracing::info;
 
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = [home_dir().unwrap().to_str().unwrap(), "t".into()].join("/");
-    let file1 = &format!("{dir}/nestest.log.txt");
-    let file2 = &format!("{dir}/trace-new-cpu.txt");
+    let file1 = &format!("{dir}/trace-good.txt");
+    let file2 = &format!("{dir}/trace-bad.txt");
     compare_log(file1, file2)
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct LogLine {
     line: String,
@@ -26,10 +27,10 @@ struct LogLine {
 #[derive(Debug)]
 enum LineStatus {
     EOF,
-    SKIP,
+    _SKIP,
 }
 
-fn parse_cpu_trace_line(reader: &mut BufReader<File>, line_number: u64)
+fn parse_cpu_trace_line(reader: &mut BufReader<File>, _line_number: u64)
     -> Result<LogLine, LineStatus>
 {
     let mut line_read = String::new();
@@ -43,7 +44,7 @@ fn parse_cpu_trace_line(reader: &mut BufReader<File>, line_number: u64)
     let dashes = line_read.split("-").collect::<Vec<&str>>();
 
     // H,V
-    let mut hv = dashes[1].split(",");;
+    let mut hv = dashes[1].split(",");
     let h = u16::from_str_radix(hv.next().unwrap().trim(), 10).unwrap();
     let v = u16::from_str_radix(hv.next().unwrap().trim(), 10).unwrap();
 
@@ -60,12 +61,12 @@ fn parse_cpu_trace_line(reader: &mut BufReader<File>, line_number: u64)
     let registers = format!("A:{a:02X} X:{x:02X} Y:{y:02X} P:{flags:02X} SP:{sp:02X}");
     let pc = &d[7][.. d[7].len() - 1];
     let mut asm = [d[11], d[12], d[13], d[14], d[15], d[16], d[17], d[18]].join(" ").trim().to_string();
-    if let Some(index) = asm.find("|") {
+    if let Some(_index) = asm.find("|") {
         if let Some((a, _)) = asm.split_once("|") {
             asm = a.into();
         }
     }
-    asm = (asm.to_string().trim()).to_string();
+    asm = asm.to_string().trim().to_string();
 
     Ok(LogLine {
         line,
@@ -90,7 +91,8 @@ fn parse_flags(f: &str) -> u8 {
     result
 }
 
-fn parse_nestest_line(reader: &mut BufReader<File>, line_number: u64)
+#[allow(dead_code)]
+fn parse_nestest_line(reader: &mut BufReader<File>, _line_number: u64)
     -> Result<LogLine, LineStatus>
 {
     let mut line_read = String::new();
@@ -193,7 +195,7 @@ fn maybe_remove(full_asm: &str, c: char) -> String {
     result.into()
 }
 
-fn parse_mesen_line(reader: &mut BufReader<File>, line_number: u64) -> Result<LogLine, LineStatus> {
+fn _parse_mesen_line(reader: &mut BufReader<File>, line_number: u64) -> Result<LogLine, LineStatus> {
     let mut line_read = String::new();
     reader.read_line(&mut line_read).unwrap();
     let line = line_read.clone();
@@ -201,7 +203,7 @@ fn parse_mesen_line(reader: &mut BufReader<File>, line_number: u64) -> Result<Lo
         return Err(LineStatus::EOF);
     }
     if line.starts_with('#') {
-        return Err(LineStatus::SKIP);
+        return Err(LineStatus::_SKIP);
     }
     // println!("Parsing line:{line}");
     let mut i = 0;
@@ -299,12 +301,12 @@ fn lines_match(line1: &LogLine, line2: &LogLine) -> Option<Vec<String>> {
     if line1.registers != line2.registers {
         result.push(format!("Different registers:\n{}\n{}", line1.registers, line2.registers));
     }
-    if line1.v != line2.v {
-        result.push(format!("Different V: {:?} vs {:?}", line1.v, line2.v));
-    }
-    if line1.h != line2.h {
-        result.push(format!("Different H: {:?} vs {:?}", line1.h, line2.h));
-    }
+    // if line1.v != line2.v {
+    //     result.push(format!("Different V: {:?} vs {:?}", line1.v, line2.v));
+    // }
+    // if line1.h != line2.h {
+    //     result.push(format!("Different H: {:?} vs {:?}", line1.h, line2.h));
+    // }
 
     if result.is_empty() { None } else { Some(result) }
 }
@@ -319,7 +321,7 @@ pub fn compare_log(file_name_1: &str, file_name_2: &str) -> Result<(), Box<dyn s
     let mut line: u64 = 1;
     let mut stop = false;
     while ! stop {
-        let line1 = parse_nestest_line(&mut reader1, line);
+        let line1 = parse_cpu_trace_line(&mut reader1, line);
         let line2 = parse_cpu_trace_line(&mut reader2, line);
         match(line1, line2) {
             (Ok(line1), Ok(line2)) => {

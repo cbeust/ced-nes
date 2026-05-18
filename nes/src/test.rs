@@ -1,3 +1,4 @@
+use crate::emulator::CpuInterface;
 use crate::app::SharedState;
 use crate::constants::{RomInfo, ROM_NAMES};
 use crate::emulator::Emulator;
@@ -9,9 +10,19 @@ use crate::{get_bits, Args};
 use cpu::memory::Memory;
 use std::ops::Range;
 use std::sync::{Arc, RwLock};
+use test_case::test_case;
+use tracing::debug;
 
 fn find_rom(id: usize) -> RomInfo {
     ROM_NAMES.iter().find(|rom| rom.id == id).cloned().unwrap_or(ROM_NAMES[0].clone())
+}
+
+fn find_rom_by_name(name: &str) -> RomInfo {
+    ROM_NAMES.iter().find(|rom| {
+        debug!("Looking at rom:{rom:#?}");
+        rom.file_name.clone() == name
+    }).cloned()
+    .unwrap_or(ROM_NAMES[0].clone())
 }
 
 #[test]
@@ -72,7 +83,7 @@ pub fn test_ppu2() {
 // }
 // #[cfg(test)]
 fn mirror(mut mirrors: Range<u16>, addresses: Range<u16>, mirror_fn: impl Fn(u16) -> u16) {
-    let mut _index = 0;
+    let mut index = 0;
     let mirrors_array: Vec<u16> = mirrors.collect();
     let mut mirrors_index = 0;
 
@@ -147,54 +158,74 @@ pub fn test_mirroring() {
     mirror(0x3f00..0x3f20, 0x3f00..0x4000, NesMemory::ppu_mirrorring)
 }
 
-#[test]
+// #[test]
 pub fn test_blarg() {
     let tests = vec![
         // Sprite 0 hits
         551, 552, 553, 554, 555, 556, 558,
         // PPU
         561, 562,
+        // Timings
+        559,
         // Branches
         582, 583, 584,
     ];
 
     // init_logging(true);
-    for test_id in tests {
-        let selected_rom = test_id;
-        let shared_state = Arc::new(RwLock::new(SharedState::default()));
-        let rom_info = find_rom(selected_rom);
+    // for test_id in tests {
+    //     run_blargg_test(test_id);
+    // }
+}
 
-        let mut emulator = Emulator::new(
-            rom_info.clone(),
-            shared_state,
-            Arc::new(RwLock::new(Joypad::default())),
-            Args::default());
+#[test_case("01.basics.nes")]
+#[test_case("02.alignment.nes")]
+#[test_case("03.corners.nes")]
+#[test_case("04.flip.nes")]
+#[test_case("05.left_clip.nes")]
+#[test_case("06.right_edge.nes")]
+#[test_case("07.screen_bottom.nes")]
+#[test_case("08.double_height.nes")]
+#[test_case("09.timing_basics.nes")]
+#[test_case("palette_ram.nes")]
+#[test_case("sprite_ram.nes")]
+#[test_case("1.Branch_Basics.nes")]
+#[test_case("2.Backward_Branch.nes")]
+#[test_case("3.Forward_Branch.nes")]
+fn run_blargg_test(name: &str) {
+    let shared_state = Arc::new(RwLock::new(SharedState::default()));
+    let rom_info = find_rom_by_name(name);
+    let test_id = rom_info.id;
 
-        let mut stop = false;
-        let mut success = false;
-        let mem = if test_id == 561 || test_id == 562 { 0xf0 } else { 0xf8 };
-        let mut previous_pc = 0;
-        while !stop {
-            let mut has_advanced = false;
-            while ! has_advanced {
-                (has_advanced, _) = emulator.tick_one();
-            }
-            if emulator.cpu.pc == previous_pc {
-                stop = true;
-                success = emulator.cpu.memory.get(mem) == 1;
-            }
-            previous_pc = emulator.cpu.pc;
-            // emulator.tick_one_cycle();
+    let mut emulator = Emulator::new(
+        rom_info.clone(),
+        shared_state,
+        Arc::new(RwLock::new(Joypad::default())),
+        Args::default(), None);
+
+    let mut stop = false;
+    let mut success = false;
+    let mem = if test_id == 561 || test_id == 562 { 0xf0 } else { 0xf8 };
+    let mut previous_pc = 0;
+    while !stop {
+        let mut has_advanced = false;
+        while ! has_advanced {
+            (has_advanced, _, _) = emulator.tick_one();
         }
-
-        if success {
-            println!("✅ Test \"{}\" passed", rom_info.name());
-        } else {
-            println!("❌ Test \"{}\" failed: {}", rom_info.name(), emulator.cpu.memory.get(mem));
+        if emulator.cpu.pc() == previous_pc {
+            stop = true;
+            success = emulator.cpu.memory().get(mem) == 1;
         }
-        assert!(success,
-            "❌ Test \"{}\" failed: {}", rom_info.name(), emulator.cpu.memory.get(mem));
+        previous_pc = emulator.cpu.pc();
+        // emulator.tick_one_cycle();
     }
+
+    if success {
+        println!("✅ Test \"{}\" passed", rom_info.name());
+    } else {
+        println!("❌ Test \"{}\" failed: {}", rom_info.name(), emulator.cpu.memory().get(mem));
+    }
+    assert!(success,
+            "❌ Test \"{}\" failed: {}", rom_info.name(), emulator.cpu.memory().get(mem));
 }
 
 fn assert_eq(ppu: &Ppu, ir: &IR, v: u16, expected: u16, message: &str) {
@@ -251,7 +282,7 @@ pub fn test_2000_range() {
             (0xffff, 0, 0b1111_0011_1111_1111), (0xffff, 1, 0b1111_0111_1111_1111),
             (0xffff, 0b10, 0b1111_1011_1111_1111), (0xffff, 0b11, 0b1111_1111_1111_1111)
         ];
-        for (_index, (initial, value, expected)) in data.iter().enumerate() {
+        for (index, (initial, value, expected)) in data.iter().enumerate() {
             mem.ir.t = *initial;
             mem.set(0x2000, *value);
             assert_eq!(mem.ir.t, *expected as u16, "Iteration {index} failed");
@@ -441,7 +472,7 @@ pub fn test_cycle_count() {
         count += 1;
         stop = ppu.scanline() == 0 && ppu.cycle() == 0;
     }
-    assert_eq!(count, 89314);
+    assert_eq!(count, 89342);
 }
 
 #[test]

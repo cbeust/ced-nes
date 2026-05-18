@@ -8,7 +8,8 @@ use tracing::{debug};
 
 pub const MEMORY_SIZE: usize = 65_536;
 
-use crate::ppu::{Ppu, BIT_SPRITE_OVERFLOW, BIT_VBL};
+use crate::ppu::{BIT_SPRITE_OVERFLOW, BIT_VBL};
+use crate::ppu2::Ppu2;
 use crate::ppu_ctrl::PpuCtrl;
 use crate::ppu_mask::PpuMask;
 use crate::rom::Mirroring;
@@ -22,7 +23,12 @@ pub struct NesMemory{
     pub ppu_ctrl: PpuCtrl,
     pub ppu_mask: PpuMask,
     pub joypad: Arc<RwLock<Joypad>>,
+
+    #[cfg(feature = "ppu1")]
     ppu: Arc<RwLock<Ppu>>,
+    #[cfg(not(feature = "ppu1"))]
+    ppu: Arc<RwLock<Ppu2>>,
+
     apu: Arc<RwLock<Apu>>,
     internal_buffer: u8,
     pub mapper: MapperBase,
@@ -32,7 +38,13 @@ pub struct NesMemory{
 impl NesMemory{
     pub fn new(mapper: MapperBase,
         joypad: Arc<RwLock<Joypad>>,
+
+        #[cfg(not(feature = "ppu1"))]
+        ppu: Arc<RwLock<Ppu2>>,
+
+        #[cfg(feature = "ppu1")]
         ppu: Arc<RwLock<Ppu>>,
+
         apu: Arc<RwLock<Apu>>,
     ) -> Self
     {
@@ -60,10 +72,14 @@ impl NesMemory{
     }
 
     pub fn new_for_testing() -> Self {
+        #[cfg(feature = "ppu1")]
+        let ppu = Arc::new(RwLock::new(Ppu::default()));
+        #[cfg(not(feature = "ppu1"))]
+        let ppu = Arc::new(RwLock::new(Ppu2::default()));
         let mut result =
             NesMemory::new(MapperBase::default(),
                 Arc::new(RwLock::new(Joypad::new())),
-                Arc::new(RwLock::new(Ppu::default())),
+                ppu,
                 Arc::new(RwLock::new(Apu::new()))
             );
         result.init = false;
@@ -175,16 +191,28 @@ impl NesMemory{
         let mut result = self.memory[address as usize];
         if ! self.init && Self::is_register(address) {
             match address {
+                0x2000 | 0x2001 | 0x2003 => {
+                    // Write only registers, return the open bus
+                    result = self.ppu.read().unwrap().get_open_bus();
+                }
                 0x2002 => {
                     // w:                  <- 0
                     self.ir.w = false;
+                    // VSOx xxxx
+                    // |||| ||||
+                    // |||+-++++- (PPU open bus or 2C05 PPU identifier)
+                    // ||+------- Sprite overflow flag
+                    // |+-------- Sprite 0 hit flag
+                    // +--------- Vblank flag, cleared on read. Unreliable; see below.
                     self.clear_bit(0x2002, BIT_SPRITE_OVERFLOW);
                     self.clear_bit(0x2002, BIT_VBL);
                     // $2002: bits 0 through 4 are open bus
-                    result = (result & 0b1110_0000) | (self.ppu.read().unwrap().get_open_bus() & 0x1f);
-                }
-                0x2003 => {
-                    result = self.ppu.read().unwrap().get_open_bus() & 0x1f;
+                    result = (result & 0b1110_0000)
+                        | (self.ppu.read().unwrap().get_open_bus() & 0x1f);
+                    //  reading $2002 overwrites latch bits 7..5 with current status bits.
+                    let mut open_bus = self.ppu.read().unwrap().get_open_bus();
+                    open_bus = (result & 0b1110_0000) | (open_bus & 0b0001_1111);
+                    self.ppu.write().unwrap().set_open_bus(open_bus);
                 }
                 0x2004 => {
                     let oam_address = self.ppu.read().unwrap().oam_address;
@@ -206,15 +234,28 @@ impl NesMemory{
 
                     result = if is_palette {
                         // If palette address, return the direct result and not the internal buffer
-                        // but set the internal buffer to the 0x2700 address
+                        // The PPU also performs a normal read from PPU memory
+                        // at the specified address, "underneath" the palette data,
                         let a2 = 0x3f00 + (a & 0x1f);
-                        let result = self.ppu.read().unwrap().get_vram(a2, &mut self.mapper);
-                        let ts = 0x2700 + (a & 0xff);
+                        let vram = self.ppu.read().unwrap().get_vram(a2, &mut self.mapper);
+                        let ts = 0x2f00 + (a & 0xff);
                         self.internal_buffer = self.ppu.read().unwrap().get_vram(ts, &mut self.mapper);
                         debug!(target: "vram", "Reading VRAM palette [{a:04X}/{a2:02X}]:{:02X} and \
                         set internal_buffer to {:02X}",
                             result, self.internal_buffer);
-                        result
+                        // Palette values are 6 bits
+
+                        if self.ppu_mask.greyscale() {
+                            // Greyscale: Reading from Palette RAM with greyscale mode enabled
+                            // always reads the lower four bits as zero ;;;
+                            vram & 0b1111_0000
+                            // Read $10 from palette ram! (notably, not $5A, which is the value we
+                            // wrote. Not even $1A. Rather, the lower four bits are all zero.)
+                        } else {
+                            // Not greyscale
+                            let open_bus = self.ppu.read().unwrap().get_open_bus();
+                            (open_bus & 0b1100_0000) | (vram & 0b0011_1111)
+                        }
                     } else {
                         // Regular VRAM read, return the internal buffer then update the internal
                         // buffer to the actual VRAM value
@@ -226,14 +267,19 @@ impl NesMemory{
                         result
                     };
 
-                    self.ir.increment_v(self.ppu_ctrl.vram_increment);
+                    let increment = if (self.ppu_mask.background_rendering()
+                        || self.ppu_mask.sprite_rendering())
+                        && self.ppu.read().unwrap().scanline < 240
+                    {
+                        // Increment both coarse X and Y
+                        0x1001
+                    } else {
+                        self.ppu_ctrl.vram_increment
+                    };
+
+                    self.ir.increment_v(increment);
 
                     debug!(target: "ir", "IR:{}: $2007 read {result:02X}", self.ir);
-                    // TODO:  During rendering (on the pre-render line and the visible lines 0-239,
-                    // provided either background or sprite rendering is enabled), it will update
-                    // v in an odd way, triggering a coarse X increment and a Y increment
-                    // simultaneously (with normal wrapping behavior)
-
                 }
                 0x4015 => {
                     result = self.apu.write().unwrap().get(address);
@@ -244,7 +290,9 @@ impl NesMemory{
                     // TODO: Enabling this makes the cursor move down
                     result = self.joypad.write().unwrap().read();
                 }
-                _ => {}
+                _ => {
+                    result = ((address & 0xff00) >> 8) as u8;
+                }
             }
             self.ppu.write().unwrap().set_open_bus(result);
         }
@@ -285,12 +333,17 @@ impl NesMemory{
 
                     // t: ...GH.. ........ <- d: ......GH
                     self.ir.t = set_bit_with_mask!(self.ir.t, value as u16, 0b11, 10);
-                    debug!(target: "ir", "$2000 write IR:{}: value:{value:0b} t:{:0b}", self.ir, self.ir.t);
+                    debug!(target: "ir", "$2000 write IR:{}: value:{value:0b} t:{:0b}", self.ir,
+                        self.ir.t);
+                    // ;;; Test 2 [PPU Open Bus]: All PPU Registers update PPU Open Bus. ;;;
                 }
                 0x2001 => {
-                    // PPUMASK
+                    // PPUMASK – rendering bits take effect after a 3/4-dot delay.
                     debug!(target: "2001", "Writing PPUMASK $2001: {value:02X}");
-                    self.ppu_mask = PpuMask::new(value);
+                    self.ppu_mask.from_write(value);
+                }
+                0x2002 => {
+                    // not writable
                 }
                 0x2003 => {
                     // OAMADDR
@@ -345,7 +398,6 @@ impl NesMemory{
                     // PPUDATA
 
                     let a = self.ir.v as usize & 0x3fff;
-                    let _a2 = Self::nametable_mirroring(self.mapper.mirroring(), a);
 
                     self.ppu.write().unwrap().set_vram(a, value, &mut self.mapper);
                     // Palette mirroring: addresses 0x3F00/0x3F10, 0x3F04/0x3F14, 0x3F08/0x3F18,
@@ -393,7 +445,9 @@ impl NesMemory{
             }
             self.ppu.write().unwrap().set_open_bus(value);
         }
-        self.set_force(address, value);
+        if address != 0x2002 {
+            self.set_force(address, value);
+        }
     }
 }
 

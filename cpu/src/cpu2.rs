@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::process::exit;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
 use crate::config::{Config, System};
@@ -87,6 +86,8 @@ pub struct Cpu2<T: Memory> {
     pc_was_changed: bool,
     pub log_file: LogFile,
     system: System,
+
+    pub is_get_phase: bool,
 }
 
 impl<T: Memory> Cpu2<T> {
@@ -140,6 +141,7 @@ impl<T: Memory> Cpu2<T> {
             instruction_cycles: 0,
             pc_was_changed: false,
             system: System::Nes,
+            is_get_phase: true, // should be random
         }
     }
 
@@ -176,9 +178,16 @@ impl<T: Memory> Cpu2<T> {
 
         if self.finished {
             if let Some((low, high)) = self.pending_interrupt {
-                self.handle_interrupt_full(false, low, high);
+                // NMI (low == 0xfffa) is non-maskable and always fires.
+                // IRQ (low == 0xfffe) is maskable: only fire when I flag is clear.
+                let is_nmi = low == 0xfffa;
+                if is_nmi || !self.p.i() {
+                    self.handle_interrupt_full(false, low, high);
+                    info!("PC after interrupt:{:04X}", self.pc());
+                }
+                // Always clear pending_interrupt: if IRQ was masked, the emulator
+                // will re-raise it next cycle while the IRQ line stays asserted.
                 self.pending_interrupt = None;
-                info!("PC after interrupt:{:04X}", self.pc());
             }
 
             self.instruction_cycles = 0;
@@ -572,7 +581,7 @@ impl<T: Memory> Cpu2<T> {
             //
             LDA_IMM | LDX_IMM | LDY_IMM | EOR_IMM | AND_IMM | ORA_IMM | ADC_IMM | SBC_IMM | CMP_IMM
                 | NOP_7 | NOP_9 | NOP_10 | NOP_11 | NOP_8
-                | SBC_IMM | USBC_IMM
+                | USBC_IMM
             => {
                 match self.current_cycle {
                     2 => {
@@ -1469,6 +1478,7 @@ impl<T: Memory> Cpu2<T> {
         }
         self.current_cycle += 1;
 
+        self.is_get_phase = ! self.is_get_phase;
         result
     }
 
@@ -1729,7 +1739,11 @@ impl<T: Memory> Cpu2<T> {
 
     pub fn irq(&mut self) {
         debug!(target: "cpu", "IRQ received");
-        self.pending_interrupt = Some((0xfffe, 0xffff));
+        // IRQ must not overwrite a pending NMI (NMI has higher priority)
+        match self.pending_interrupt {
+            Some((0xfffa, _)) => {} // NMI is pending, keep it
+            _ => { self.pending_interrupt = Some((0xfffe, 0xffff)); }
+        }
     }
 
     fn handle_interrupt_full(&mut self, brk: bool, low: u16, high: u16) {
@@ -1748,18 +1762,19 @@ impl<T: Memory> Cpu2<T> {
         result
     }
 
-    fn handle_interrupt(&mut self, _brk: bool, low: u16, high: u16) {
+    fn handle_interrupt(&mut self, brk: bool, low: u16, high: u16) {
         match self.current_cycle {
             2 => {
                 //         2    PC     R  read next instruction byte (and throw it away),
-                //                        increment PC
+                //                        increment PC (only for BRK – skips the padding byte)
                 let _ = self.memory.get(self.pc()) as usize;
-                // self.inc_pc();
+                if brk {
+                    self.inc_pc(); // BRK must increment past the padding byte
+                }
             }
             3 => {
-                //         3  $0100,S  W  push PCH on stack (with B flag set), decrement S
+                //         3  $0100,S  W  push PCH on stack, decrement S
                 self.push_to_stack(((self.pc() & 0xff00) >> 8) as u8);
-                self.p.set_b(true);
             }
             4 => {
                 //         4  $0100,S  W  push PCL on stack, decrement S
@@ -1767,22 +1782,39 @@ impl<T: Memory> Cpu2<T> {
             }
             5 => {
                 //         5  $0100,S  W  push P on stack, decrement S
-                self.push_to_stack(self.p.value());
+                // Bit 4 (B flag) is 1 for BRK/PHP pushes, 0 for NMI/IRQ pushes.
+                // Bit 5 (unused) is always 1.
+                let pushed_p = if brk {
+                    self.p.value() | 0x30  // B=1, U=1
+                } else {
+                    (self.p.value() | 0x20) & !0x10  // B=0, U=1
+                };
+                self.push_to_stack(pushed_p);
                 self.p.set_i(true);
             }
             6 => {
                 //         6   $FFFE   R  fetch PCL
-                info!("Reading low:{low:004X}");
-                self.low_byte =  self.memory.get(low) as usize;
-                debug!(target: "cpu", "6 pc: {:04X}", self.pc());
+                // NMI-BRK hijacking: if an NMI was detected during BRK execution,
+                // use the NMI vector instead of the IRQ/BRK vector.
+                let effective_low = if brk && self.pending_interrupt == Some((0xfffa, 0xfffb)) {
+                    0xfffau16
+                } else {
+                    low
+                };
+                self.low_byte = self.memory.get(effective_low) as usize;
             }
             7 => {
                 //         7   $FFFF   R  fetch PCH
-                let high = (self.memory.get(high) as u16) << 8;
-                self.set_pc(self.low_byte as u16 | high);
-                info!("NMI Jumping to PC:{:04X}", self.pc());
+                // NMI-BRK hijacking: use NMI vector hi byte and consume the pending NMI.
+                let hijacked = brk && self.pending_interrupt == Some((0xfffa, 0xfffb));
+                let effective_high = if hijacked { 0xfffbu16 } else { high };
+                let h = (self.memory.get(effective_high) as u16) << 8;
+                self.set_pc(self.low_byte as u16 | h);
+                if hijacked {
+                    // The NMI was consumed by the BRK hijack; don't fire it again.
+                    self.pending_interrupt = None;
+                }
                 self.finished = true;
-                debug!(target: "cpu", "7 pc: {:04X}", self.pc());
             }
             _ => if self.current_cycle != 1 {
                 panic!("Cycle {} should not happen", self.current_cycle)

@@ -1,4 +1,3 @@
-use tracing::info;
 use cpu::memory::Memory;
 use crate::nes_memory::NesMemory;
 
@@ -46,7 +45,7 @@ impl Dmc {
             0 => {
                 // $4010 - IL--.RRRR
                 self.irq_enabled = (val & 0x80) != 0;
-                info!(target: "asm", "Writing to $4010, DMC IRQ enabled={}", self.irq_enabled);
+                // info!(target: "asm", "Writing to $4010, DMC IRQ enabled={}", self.irq_enabled);
                 if !self.irq_enabled {
                     self.irq_flag = false;
                 }

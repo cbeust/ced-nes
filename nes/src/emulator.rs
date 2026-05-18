@@ -5,7 +5,7 @@ use crate::joypad::Joypad;
 use crate::mappers::mapper_base::MapperBase;
 use crate::mesen_logger::{MesenLogger, LOG_CYCLE, LOG_SCANLINE};
 use crate::nes_memory::NesMemory;
-use crate::ppu::{Ppu, PpuResult, CURRENT_CYCLE, CURRENT_SCANLINE};
+use crate::ppu::{PpuResult, CURRENT_CYCLE, CURRENT_SCANLINE};
 use crate::rom::Rom;
 use crate::Args;
 use cpu::config::{Config, System};
@@ -14,11 +14,13 @@ use cpu::cpu2::Cpu2;
 use cpu::external_logger::{DefaultLogger, IExternalLogger};
 use cpu::labels::Labels;
 use cpu::memory::Memory;
-use lazy_static::lazy_static;
+use enum_dispatch::enum_dispatch;
+use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tracing::{debug, info};
+use crate::ppu2::Ppu2;
 
 const TICK_BATCH_CYCLES: usize = 2_000;
 
@@ -26,78 +28,77 @@ pub struct FrameStat {
     _duration_ms: u16,
 }
 
-pub static mut FRAME: [u8; WIDTH * HEIGHT] = [0; WIDTH * HEIGHT];
+pub static FRAME: Lazy<RwLock<[u8; WIDTH * HEIGHT]>> =
+    Lazy::new(|| RwLock::new([0; WIDTH * HEIGHT]));
 
-enum CpuType {
+/// Trait that abstracts over `Cpu<NesMemory>` and `Cpu2<NesMemory>`.
+#[allow(dead_code)]
+#[enum_dispatch]
+pub trait CpuInterface {
+    fn set_pc(&mut self, pc: u16);
+    fn pc(&self) -> u16;
+    fn set_s(&mut self, v: u8);
+    fn nmi(&mut self);
+    fn irq(&mut self);
+    fn get_cycles(&self) -> u128;
+    fn is_get_phase(&self) -> bool;
+    fn add_cycles(&mut self, cycles: u128);
+    fn one_cycle(&mut self, config: &mut Config, breakpoints: &HashSet<u16>) -> (bool, u8);
+    fn set_get_phase(&mut self, get: bool);
+    fn memory(&mut self) -> &mut NesMemory;
+}
+
+impl CpuInterface for Cpu<NesMemory> {
+    fn set_pc(&mut self, pc: u16) { Cpu::set_pc(self, pc); }
+    fn pc(&self) -> u16 { Cpu::pc(self) }
+    fn set_s(&mut self, v: u8) { self.s = v; }
+    fn nmi(&mut self) { Cpu::nmi(self); }
+    fn irq(&mut self) { Cpu::irq(self); }
+    fn get_cycles(&self) -> u128 { self.cycles }
+    fn is_get_phase(&self) -> bool { false }
+    fn add_cycles(&mut self, cycles: u128) { self.cycles += cycles; }
+    fn one_cycle(&mut self, config: &mut Config, breakpoints: &HashSet<u16>) -> (bool, u8) {
+        Cpu::one_cycle(self, config, breakpoints)
+    }
+    fn set_get_phase(&mut self, _get: bool) {}
+    fn memory(&mut self) -> &mut NesMemory { &mut self.memory }
+}
+
+impl CpuInterface for Cpu2<NesMemory> {
+    fn set_pc(&mut self, pc: u16) { Cpu2::set_pc(self, pc); }
+    fn pc(&self) -> u16 { Cpu2::pc(self) }
+    fn set_s(&mut self, v: u8) { self.s = v; }
+    fn nmi(&mut self) { Cpu2::nmi(self); }
+    fn irq(&mut self) { Cpu2::irq(self); }
+    fn get_cycles(&self) -> u128 { self.cycles }
+    fn is_get_phase(&self) -> bool { self.is_get_phase }
+    fn add_cycles(&mut self, cycles: u128) { self.cycles += cycles; }
+    fn one_cycle(&mut self, config: &mut Config, breakpoints: &HashSet<u16>) -> (bool, u8) {
+        Cpu2::one_cycle(self, config, breakpoints)
+    }
+    fn set_get_phase(&mut self, get: bool) { self.is_get_phase = get; }
+    fn memory(&mut self) -> &mut NesMemory { &mut self.memory }
+}
+
+#[enum_dispatch(CpuInterface)]
+pub(crate) enum CpuType {
     Old(Cpu<NesMemory>),
     New(Cpu2<NesMemory>),
 }
 
-impl CpuType {
-    pub fn set_pc(&mut self, pc: u16) {
-        match self {
-            CpuType::Old(cpu) => cpu.set_pc(pc),
-            CpuType::New(cpu) => cpu.set_pc(pc),
-        }
-    }
-
-    pub fn set_s(&mut self, v: u8) {
-        match self {
-            CpuType::Old(cpu) => { cpu.s = v; }
-            CpuType::New(cpu) => { cpu.s = v; }
-        }
-    }
-
-    pub(crate) fn nmi(&mut self) {
-        match self {
-            CpuType::Old(cpu) => cpu.nmi(),
-            CpuType::New(cpu) => cpu.nmi(),
-        }
-    }
-
-    pub(crate) fn irq(&mut self) {
-        match self {
-            CpuType::Old(cpu) => cpu.irq(),
-            CpuType::New(cpu) => cpu.irq(),
-        }
-    }
-
-    pub(crate) fn get_cycles(&mut self) -> u128 {
-        match self {
-            CpuType::Old(cpu) => cpu.cycles,
-            CpuType::New(cpu) => cpu.cycles,
-        }
-    }
-
-    pub(crate) fn add_cycles(&mut self, cycles: u128) {
-        match self {
-            CpuType::Old(cpu) => { cpu.cycles += cycles }
-            CpuType::New(cpu) => { cpu.cycles += cycles }
-        }
-    }
-
-    pub fn one_cycle(&mut self, config: &mut Config,
-                     breakpoints: &HashSet<u16>) -> (bool, u8) {
-        match self {
-            CpuType::Old(cpu) => cpu.one_cycle(config, breakpoints),
-            CpuType::New(cpu) => cpu.one_cycle(config, breakpoints),
-        }
-    }
-
-    pub fn memory(&mut self) -> &mut NesMemory {
-        match self {
-            CpuType::Old(c) => { &mut c.memory }
-            CpuType::New(c) => { &mut c.memory }
-        }
-    }
-}
 
 pub struct Emulator {
     // New
     // pub cpu: Cpu2<NesMemory>,
     // pub cpu: Cpu<NesMemory>,
-    cpu: CpuType,
+    pub(crate) cpu: CpuType,
+
+    #[cfg(not(feature = "ppu1"))]
+    pub(crate) ppu: Arc<RwLock<Ppu2>>,
+
+    #[cfg(feature = "ppu1")]
     pub(crate) ppu: Arc<RwLock<Ppu>>,
+
     pub(crate) apu: Arc<RwLock<Apu>>,
     pub _rom: Option<Rom>,
     pub config: Config,
@@ -118,7 +119,8 @@ pub struct Emulator {
 
 impl Emulator {
     pub fn new(rom_info: RomInfo,
-        shared_state: Arc<RwLock<SharedState>>, joypad: Arc<RwLock<Joypad>>, args: Args)
+        shared_state: Arc<RwLock<SharedState>>, joypad: Arc<RwLock<Joypad>>, args: Args,
+        existing_apu: Option<Arc<RwLock<Apu>>>)
         -> Self
     {
         shared_state.write().unwrap().rom_name = rom_info.name();
@@ -128,26 +130,27 @@ impl Emulator {
         // let labels =
         //     Labels::from_file(&format!("{home_dir}\\rust\\sixty.rs\\nes\\AccuracyCoin.fns"))
         //         .unwrap();
-        let mut labels = Labels::default();
-        [
-            (0x2000, "PpuControl_2000"),
-            (0x2001, "PpuMask_2001"),
-            (0x2002, "PpuStatus_2002"),
-            (0x2003, "OamAddr_2003"),
-            (0x2004, "OamData_2004"),
-            (0x2005, "PpuScroll_2005"),
-            (0x2006, "PpuAddr_2006"),
-            (0x2007, "PpuData_2007"),
-            (0x2008, "PpuAddr_2008"),
-            (0x4000, "Sq0Duty_4000"),
-            (0x4010, "DmcFreq_4010"),
-            (0x4014, "SpriteDma_4014"),
-            (0x4015, "ApuStatus_4015"),
-            (0x4016, "Ctrl1_4016"),
-            (0x4017, "Ctrl2_FrameCtr_4017")
-        ].iter().for_each(|(k, v)| {
-            let _ = labels.insert(*k as u16, (*v).into());
-        });
+        let labels = Labels::default();
+        // [
+        //     (0x2000, "PpuControl_2000"),
+        //     (0x2001, "PpuMask_2001"),
+        //     (0x2002, "PpuStatus_2002"),
+        //     (0x2003, "OamAddr_2003"),
+        //     (0x2004, "OamData_2004"),
+        //     (0x2005, "PpuScroll_2005"),
+        //     (0x2006, "PpuAddr_2006"),
+        //     (0x2007, "PpuData_2007"),
+        //     (0x2008, "PpuAddr_2008"),
+        //     (0x4000, "Sq0Duty_4000"),
+        //     (0x4010, "DmcFreq_4010"),
+        //     (0x4014, "SpriteDma_4014"),
+        //     (0x4015, "ApuStatus_4015"),
+        //     (0x4016, "Ctrl1_4016"),
+        //     (0x4017, "Ctrl2_FrameCtr_4017"),
+        //     (0xf916, "WaitForVBlank"),
+        // ].iter().for_each(|(k, v)| {
+        //     let _ = labels.insert(*k as u16, (*v).into());
+        // });
         let config = Config {
             emulator_speed_hz: 16_000_000,
             debug_asm: DEBUG_ASM,
@@ -160,8 +163,18 @@ impl Emulator {
             ..Default::default()
         };
         let mut mapper = MapperBase::new(&rom);
+        #[cfg(feature = "ppu1")]
         let ppu = Arc::new(RwLock::new(Ppu::new(&mut mapper)));
-        let apu = Arc::new(RwLock::new(Apu::new()));
+        #[cfg(not(feature = "ppu1"))]
+        let ppu = Arc::new(RwLock::new(Ppu2::new(&mut mapper)));
+        // Reuse the existing APU (and its audio device) when rebooting so we never
+        // tear down / recreate the rodio stream, which would cause a click.
+        let apu = if let Some(existing) = existing_apu {
+            existing.write().unwrap().reset_state();
+            existing
+        } else {
+            Arc::new(RwLock::new(Apu::new()))
+        };
         let len = rom.prg_rom.len();
         debug!(target: "rom", "prg_rom length: {len:04X}");
         let irq = ((rom.prg_rom[len - 1] as u16) << 8) | rom.prg_rom[len - 2] as u16;
@@ -192,7 +205,12 @@ impl Emulator {
         let apu2 = apu.clone();
         Self {
             cpu,
+            #[cfg(not(feature = "ppu1"))]
             ppu: ppu2,
+
+            #[cfg(feature = "ppu1")]
+            ppu,
+
             apu: apu2,
             _rom: Some(rom),
             config,
@@ -209,12 +227,18 @@ impl Emulator {
         }
     }
 
-    pub fn tick(&mut self) -> u128 {
+    /// (cycles, frame_completed)
+    pub fn tick(&mut self) -> (u128, bool) {
         let mut cycles = 0;
-        for _ in 0..TICK_BATCH_CYCLES {
-            cycles += self.tick_one().1;
+        let mut frame_completed = false;
+        let mut i = 0;
+        while i < TICK_BATCH_CYCLES && ! frame_completed {
+            let (_, c, frame_done) = self.tick_one();
+            cycles +=c;
+            frame_completed |= frame_done;
+            i += 1;
         }
-        cycles
+        (cycles, frame_completed)
     }
 
     // pub fn _tick_one(&mut self) -> u128 {
@@ -233,7 +257,8 @@ impl Emulator {
         mask.sprite_rendering() && mask.background_rendering()
     }
 
-    pub fn tick_one(&mut self) -> (bool, u128) {
+    /// (has_advanced, cycle_count, frame_completed)
+    pub fn tick_one(&mut self) -> (bool, u128, bool) {
 
         // New
         // let cycles = self.cpu.cycles;
@@ -242,12 +267,15 @@ impl Emulator {
         // let new_cycles = CYCLES.read().unwrap().add(cycles as u128);
         // *CYCLES.write().unwrap() = new_cycles;
 
+        let mut frame_completed = false;
+
         //
         // Tick the PPU three times
-        let sprite_rendering = self.cpu.memory().ppu_mask.sprite_rendering();
-        let background_rendering = self.cpu.memory().ppu_mask.background_rendering();
         for _ in 1..=3 {
-            // self.cpu.memory().ppu_mask.update_rendering_counts();
+            // Read rendering flags fresh each dot so that a ppu_mask.tick() inside
+            // ppu.tick() that flips the effective state is visible for the very next dot.
+            let sprite_rendering = self.cpu.memory().ppu_mask.sprite_rendering();
+            let background_rendering = self.cpu.memory().ppu_mask.background_rendering();
             // info!("PPU TICK");
             let PpuResult { vbl, frame_start, frame_end, irq_requested } =
                 self.ppu.write().unwrap().tick(sprite_rendering, background_rendering,
@@ -264,6 +292,7 @@ impl Emulator {
                 self.frame_start = Instant::now();
             }
             if frame_end {
+                frame_completed = true;
                 self.frame_stats.push(FrameStat {
                     _duration_ms: self.frame_start.elapsed().as_millis() as u16
                 });
@@ -283,10 +312,11 @@ impl Emulator {
         //
         // Tick the APU once
         //
-        let irq_requested = self.apu.write().unwrap().step(self.cpu.memory());
-        // if irq_requested {
-        //     self.cpu.irq();
-        // }
+        let is_get = self.cpu.is_get_phase();
+        let irq_requested = self.apu.write().unwrap().step(self.cpu.memory(), is_get);
+        if irq_requested {
+            self.cpu.irq();
+        }
 
         //
         // Tick the CPU once
@@ -309,14 +339,12 @@ impl Emulator {
             }
             self.cpu.add_cycles(cycles as u128);
             self.cpu.memory().pause_cpu_for_dma = false;
+            // DMA always ends on a PUT
+            debug!(target: "asm", "Forcing CPU to PUT");
+            self.cpu.set_get_phase(true);
         }
 
-        {
-            let mut ppu = self.ppu.write().unwrap();
-            ppu.ppu_ctrl = self.cpu.memory().ppu_ctrl;
-        }
-
-        (has_advanced, 1) // self.cpu.cycles)
+        (has_advanced, 1, frame_completed) // self.cpu.cycles)
     }
 
     // pub fn display_chr(&mut self, rom: Rom) -> Frame {

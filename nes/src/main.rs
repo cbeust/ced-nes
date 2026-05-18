@@ -23,7 +23,10 @@ mod apu;
 mod test;
 mod mappers;
 mod mesen_logger;
-// mod test_rom;
+mod ppu2;
+mod delayed;
+mod fm2;
+mod bk2;
 
 use crate::config_file::EmulatorConfig;
 use crate::constants::{RomInfo, ALL_MAPPERS, CPU_TYPE_NEW, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM, TRACE_FILE_NAME, USE_ICED};
@@ -61,6 +64,12 @@ pub struct Args {
 
     #[arg(long)]
     pc: Option<String>,
+
+    #[arg(long)]
+    fm2: Option<String>,
+
+    #[arg(long)]
+    bk2: Option<String>,
 }
 
 impl Clone for Args {
@@ -73,6 +82,8 @@ impl Clone for Args {
             demo: false,
             dev: false,
             pc: self.pc.clone(),
+            fm2: self.fm2.clone(),
+            bk2: self.bk2.clone(),
         }
     }
 }
@@ -121,7 +132,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     let roms: &Vec<RomInfo> = if args.dev {
         &ROM_NAMES.iter().cloned().collect()
     } else {
-        &find_roms_with_mappers(&config.rom_dir.unwrap(), ALL_MAPPERS.into())
+        &find_roms_with_mappers(&config.rom_dir.clone().unwrap(), ALL_MAPPERS.into())
     };
 
     // Log the parsed ROM IDs
@@ -146,7 +157,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if USE_ICED {
-        main_iced(args, roms.clone(), rom_info);
+        main_iced(args, roms.clone(), rom_info, config.clone());
     } else {
         main_minifb(args);
     }

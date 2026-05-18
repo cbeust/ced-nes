@@ -1,7 +1,9 @@
 use crate::is_set;
+use base64::Engine;
 use std::cmp::min;
 use std::fs::File;
 use std::io::Read;
+use base64::prelude::BASE64_STANDARD;
 use tracing::debug;
 
 #[derive(Clone, Debug, Default)]
@@ -44,6 +46,8 @@ pub struct Rom {
     // prg_ram: Vec<u8>,
     pub mapper: u16,
     pub submapper: u16,
+    /// FM2-compatible ROM checksum: MD5 of the full ROM file encoded as `base64:...`.
+    pub checksum: String,
 }
 
 impl Default for Rom {
@@ -55,6 +59,7 @@ impl Default for Rom {
             // prg_ram: Vec::new(),
             mapper: 0,
             submapper: 0,
+            checksum: String::new(),
         }
     }
 }
@@ -67,6 +72,11 @@ impl Rom {
         } else {
             Err(())
         }
+    }
+
+    pub fn calculate_checksum(file_data: &[u8]) -> String {
+        let digest = md5::compute(file_data);
+        format!("base64:{}", BASE64_STANDARD.encode(digest.0))
     }
 
     pub fn read_nes_file(file_name: &str) -> Result<Rom, ()> {
@@ -151,6 +161,8 @@ impl Rom {
         //         chr_rom_offset + i * 0x1000, chr_rom_offset + (i + 1) * 0x1000 - 1);
         // }
 
+        let checksum = Self::calculate_checksum(&buffer);
+
         let rom = Rom {
             header,
             chr_rom,
@@ -158,6 +170,7 @@ impl Rom {
             // prg_ram: Vec::new(),
             mapper: _mapper_number,
             submapper: _submapper_number,
+            checksum,
         };
 
         Ok(rom)

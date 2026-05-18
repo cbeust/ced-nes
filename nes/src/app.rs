@@ -1,6 +1,7 @@
 use crate::color::PALETTE_TUPLES;
+use crate::config_file::EmulatorConfig;
 use crate::constants::{RomInfo, *};
-use crate::emulator::{Emulator, FRAME};
+use crate::emulator::{CpuInterface, Emulator, FRAME};
 use crate::joypad::{Button, Joypad};
 use crate::rom_list::create_rom_item;
 use crate::Args;
@@ -9,19 +10,77 @@ use iced::alignment::Horizontal;
 use iced::keyboard::Key;
 use iced::mouse::Cursor;
 use iced::widget::canvas::{Cache, Fill, Geometry, Path, Program, Stroke};
-use iced::widget::scrollable::Id;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::Id;
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::widget::{checkbox, Canvas, Column, Row};
 use iced::*;
 use iced_futures::backend::default::time::every;
 use iced_futures::core::SmolStr;
 use iced_futures::Subscription;
 use rand::Rng;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::{error::RecvError, Receiver, Sender};
-use tracing::{info};
+use tracing::{info, warn};
+use crate::bk2::Bk2Movie;
+use crate::fm2::Fm2Movie;
+use crate::rom::Rom;
+
+/// Mutable global debug flag – toggled by the Debug button in the UI.
+pub static mut DEBUG_BUTTON: bool = false;
+
+#[derive(Clone)]
+struct CpuSubscriptionData {
+    id: u8,
+    sender_to_ui: Sender<ToUiMessage>,
+}
+
+impl Hash for CpuSubscriptionData {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+fn cpu_subscription_stream(
+    data: &CpuSubscriptionData,
+) -> impl iced_futures::futures::Stream<Item = AppMessage> {
+    let sender_to_ui = data.sender_to_ui.clone();
+    let rec = sender_to_ui.subscribe();
+
+    iced_futures::futures::stream::unfold(
+        (rec, sender_to_ui),
+        |(mut receiver, sender_to_ui)| async move {
+            let mut message = match receiver.recv().await {
+                Ok(ToUiMessage::Update(frequency, fps)) => {
+                    AppMessage::Update(frequency, fps)
+                }
+                Ok(ToUiMessage::SoundSamples(samples)) => {
+                    AppMessage::SoundSamples(samples)
+                }
+                Err(RecvError::Lagged(_)) => AppMessage::Ignored,
+                Err(RecvError::Closed) => {
+                    receiver = sender_to_ui.subscribe();
+                    AppMessage::Ignored
+                }
+            };
+
+            while let Ok(next) = receiver.try_recv() {
+                message = match next {
+                    ToUiMessage::Update(frequency, fps) => {
+                        AppMessage::Update(frequency, fps)
+                    }
+                    ToUiMessage::SoundSamples(samples) => {
+                        AppMessage::SoundSamples(samples)
+                    }
+                };
+            }
+
+            Some((message, (receiver, sender_to_ui)))
+        },
+    )
+}
 
 pub struct App {
     args: Args,
@@ -37,19 +96,28 @@ pub struct App {
     selected_rom_index: Option<usize>,
     filter_text: String,
     scroll_id: Id,
+    config: EmulatorConfig,
+    all_enabled: bool,
     triangle_enabled: bool,
     pulse1_enabled: bool,
     pulse2_enabled: bool,
     noise_enabled: bool,
     dmc_enabled: bool,
     is_paused: bool,
+    show_grid: bool,
+    hover_tile: Option<(u16, u16)>,
+    debug_active: bool,
     waveform_samples: Vec<f32>,
+    /// Cached from the last Update message so title() can rebuild the string at any time.
+    last_frequency: f32,
+    last_fps: u16,
 }
 
 pub struct SharedState {
     pub title: String,
     pub _joypad1: String,
     pub rom_name: String,
+    pub paused_cycle_count: u128,
 }
 
 impl Default for SharedState {
@@ -58,6 +126,7 @@ impl Default for SharedState {
             title: String::from(WINDOW_TITLE),
             _joypad1: String::from("Joypad 1"),
             rom_name: "".into(),
+            paused_cycle_count: 0,
         }
     }
 }
@@ -70,6 +139,7 @@ impl App {
     pub fn new(args: Args,
         shared_state: Arc<RwLock<SharedState>>,
         roms: Vec<RomInfo>, selected_rom_index: Option<usize>,
+        config: EmulatorConfig,
         sender_to_ui: Sender<ToUiMessage>,
         sender_to_emulator: Sender<ToEmulatorMessage>,
         joypad: Arc<RwLock<Joypad>>)
@@ -86,55 +156,35 @@ impl App {
             selected_rom_index,
             filter_text: String::new(),
             scroll_id: Id::unique(),
-            triangle_enabled: true,
-            pulse1_enabled: true,
-            pulse2_enabled: true,
-            noise_enabled: true,
-            dmc_enabled: true,
+            config: config.clone(),
+            all_enabled: config.sound_all_enabled,
+            triangle_enabled: config.sound_triangle_enabled,
+            pulse1_enabled: config.sound_pulse1_enabled,
+            pulse2_enabled: config.sound_pulse2_enabled,
+            noise_enabled: config.sound_noise_enabled,
+            dmc_enabled: config.sound_dmc_enabled,
             is_paused: false,
+            show_grid: false,
+            hover_tile: None,
+            debug_active: false,
             waveform_samples: Vec::new(),
+            last_frequency: 0.0,
+            last_fps: 0,
         }
     }
 
     pub fn subscription(&self) -> Subscription<AppMessage> {
-        let sender_to_ui = self.sender_to_ui.clone();
-        let rec = sender_to_ui.subscribe();
-        let cpu = iced_futures::futures::stream::unfold(
-            (rec, sender_to_ui),
-            |(mut receiver, sender_to_ui)| async move {
-                let mut message = match receiver.recv().await {
-                    Ok(ToUiMessage::Update(frequency, fps)) => {
-                        AppMessage::Update(frequency, fps)
-                    }
-                    Ok(ToUiMessage::SoundSamples(samples)) => {
-                        AppMessage::SoundSamples(samples)
-                    }
-                    Err(RecvError::Lagged(_)) => AppMessage::Ignored,
-                    Err(RecvError::Closed) => {
-                        receiver = sender_to_ui.subscribe();
-                        AppMessage::Ignored
-                    }
-                };
-
-                while let Ok(next) = receiver.try_recv() {
-                    message = match next {
-                        ToUiMessage::Update(frequency, fps) => {
-                            AppMessage::Update(frequency, fps)
-                        }
-                        ToUiMessage::SoundSamples(samples) => {
-                            AppMessage::SoundSamples(samples)
-                        }
-                    };
-                }
-
-                Some((message, (receiver, sender_to_ui)))
-            }
+        let cpu2 = Subscription::run_with(
+            CpuSubscriptionData {
+                id: 42,
+                sender_to_ui: self.sender_to_ui.clone(),
+            },
+            cpu_subscription_stream,
         );
-        let cpu2 = Subscription::run_with_id(42, cpu);
 
         let mut subscriptions = vec![
             // sub1,
-            event::listen().map(AppMessage::GlobalEvent),
+            keyboard::listen().map(AppMessage::KeyboardEvent),
             cpu2,
             // every,
             // window::close_events().map(WindowClosed),
@@ -162,15 +212,20 @@ impl App {
 #[derive(Debug, Clone)]
 pub enum AppMessage {
     Ignored,
-    GlobalEvent(Event),
+    KeyboardEvent(keyboard::Event),
     // Frequency, FPS
     Update(f32, u16),
     RomSelected(usize),
     Reboot,
     TogglePause,
+    ToggleGrid,
+    CanvasHovered(Point),
+    CanvasLeft,
+    ToggleDebug,
     Debug,
     RebootRandom,
     FilterTextChanged(String),
+    AllToggled(bool),
     TriangleToggled(bool),
     Pulse1Toggled(bool),
     Pulse2Toggled(bool),
@@ -292,9 +347,8 @@ impl Program<AppMessage> for App {
             // frame.scale(5.0);
             let scale_x = SCALE_X;
             let scale_y = SCALE_Y;
-            unsafe {
-                let f = &raw const FRAME;
-                for (index, color) in (*f).iter().enumerate() {
+            if let Ok(frame_buffer) = FRAME.read() {
+                for (index, color) in frame_buffer.iter().enumerate() {
                     let rgb = PALETTE_TUPLES[*color as usize];
                     let fill = Fill::from(Color::from_rgb8(rgb.0, rgb.1, rgb.2));
                     let x = (index % 256) as f32;
@@ -307,6 +361,28 @@ impl Program<AppMessage> for App {
                     frame.fill_rectangle(top_left, size, fill);
                 }
             }
+
+            if self.show_grid {
+                let grid_color = Color::from_rgba(0.8, 0.8, 0.8, 0.45);
+                let grid_x_step = 8.0 * scale_x;
+                let grid_y_step = 8.0 * scale_y;
+                let max_x = WIDTH as f32 * scale_x;
+                let max_y = HEIGHT as f32 * scale_y;
+
+                let mut x = 0.0;
+                while x <= max_x {
+                    let line = Path::line(Point::new(x, 0.0), Point::new(x, max_y));
+                    frame.stroke(&line, Stroke::default().with_color(grid_color).with_width(1.0));
+                    x += grid_x_step;
+                }
+
+                let mut y = 0.0;
+                while y <= max_y {
+                    let line = Path::line(Point::new(0.0, y), Point::new(max_x, y));
+                    frame.stroke(&line, Stroke::default().with_color(grid_color).with_width(1.0));
+                    y += grid_y_step;
+                }
+            }
         });
 
         result.push(geometry);
@@ -317,7 +393,19 @@ impl Program<AppMessage> for App {
 
 impl App {
     pub fn title(&self) -> String {
-        self.shared_state.read().unwrap().title.clone()
+        let state = self.shared_state.read().unwrap();
+        let rom_name = state.rom_name.clone();
+        let base = format!("{} - {:.02} Mhz - {} FPS - {}",
+            WINDOW_TITLE, self.last_frequency, self.last_fps, rom_name);
+        if self.is_paused {
+            return format!("{base} | Paused | Cycle {}", state.paused_cycle_count);
+        }
+        if self.show_grid {
+            if let Some((tile_x, tile_y)) = self.hover_tile {
+                return format!("{base} | Tile ({tile_x}, {tile_y})");
+            }
+        }
+        base
     }
 
     pub fn update(&mut self, message: AppMessage) -> Task<AppMessage> {
@@ -325,21 +413,20 @@ impl App {
         match message {
             Ignored => {
             }
-            GlobalEvent(event) => {
-                if let Event::Keyboard(keyboard_event) = event {
-                    match keyboard_event {
-                        // Handle key press events
-                        keyboard::Event::KeyPressed { key, .. } => {
-                            self.key_pressed(key);
-                        }
-                        keyboard::Event::KeyReleased { key, .. } => {
-                            self.key_released(key);
-                        }
-                        _ => {}
+            KeyboardEvent(event) => {
+                match event {
+                    keyboard::Event::KeyPressed { key, .. } => {
+                        self.key_pressed(key);
                     }
+                    keyboard::Event::KeyReleased { key, .. } => {
+                        self.key_released(key);
+                    }
+                    _ => {}
                 }
             }
             Update(frequency, fps) => {
+                self.last_frequency = frequency;
+                self.last_fps = fps;
                 if let Ok(mut state) = self.shared_state.write() {
                     let rom_name = state.rom_name.clone();
                     state.title = format!("{} - {:.02} Mhz - {fps} FPS - {rom_name}",
@@ -399,6 +486,30 @@ impl App {
                 self.is_paused = !self.is_paused;
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::Pause(self.is_paused));
             }
+            ToggleGrid => {
+                self.show_grid = !self.show_grid;
+                if !self.show_grid {
+                    self.hover_tile = None;
+                }
+            }
+            CanvasHovered(position) => {
+                let max_x = WIDTH as f32 * SCALE_X;
+                let max_y = HEIGHT as f32 * SCALE_Y;
+                if position.x >= 0.0 && position.y >= 0.0 && position.x < max_x && position.y < max_y {
+                    let tile_x = (position.x / (8.0 * SCALE_X)).floor() as u16;
+                    let tile_y = (position.y / (8.0 * SCALE_Y)).floor() as u16;
+                    self.hover_tile = Some((tile_x, tile_y));
+                } else {
+                    self.hover_tile = None;
+                }
+            }
+            CanvasLeft => {
+                self.hover_tile = None;
+            }
+            ToggleDebug => {
+                self.debug_active = !self.debug_active;
+                unsafe { DEBUG_BUTTON = self.debug_active; }
+            }
             Debug => {
                 crate::iced::cycle_minifb_upscale_algorithm();
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::Debug);
@@ -411,25 +522,38 @@ impl App {
             FilterTextChanged(text) => {
                 self.filter_text = text;
             }
+            AllToggled(enabled) => {
+                self.set_all_sound_channels(enabled);
+            }
             TriangleToggled(enabled) => {
                 self.triangle_enabled = enabled;
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundTriangle(enabled));
+                self.refresh_all_checkbox();
+                self.persist_sound_config();
             }
             Pulse1Toggled(enabled) => {
                 self.pulse1_enabled = enabled;
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundPulse1(enabled));
+                self.refresh_all_checkbox();
+                self.persist_sound_config();
             }
             Pulse2Toggled(enabled) => {
                 self.pulse2_enabled = enabled;
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundPulse2(enabled));
+                self.refresh_all_checkbox();
+                self.persist_sound_config();
             }
             NoiseToggled(enabled) => {
                 self.noise_enabled = enabled;
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundNoise(enabled));
+                self.refresh_all_checkbox();
+                self.persist_sound_config();
             }
             DmcToggled(enabled) => {
                 self.dmc_enabled = enabled;
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundDmc(enabled));
+                self.refresh_all_checkbox();
+                self.persist_sound_config();
             }
             SoundSamples(samples) => {
                 self.waveform_samples = samples;
@@ -437,6 +561,40 @@ impl App {
         }
 
         Task::done(Ignored)
+    }
+
+    fn refresh_all_checkbox(&mut self) {
+        self.all_enabled = self.triangle_enabled
+            && self.pulse1_enabled
+            && self.pulse2_enabled
+            && self.noise_enabled
+            && self.dmc_enabled;
+    }
+
+    fn persist_sound_config(&mut self) {
+        self.config.sound_all_enabled = self.all_enabled;
+        self.config.sound_triangle_enabled = self.triangle_enabled;
+        self.config.sound_pulse1_enabled = self.pulse1_enabled;
+        self.config.sound_pulse2_enabled = self.pulse2_enabled;
+        self.config.sound_noise_enabled = self.noise_enabled;
+        self.config.sound_dmc_enabled = self.dmc_enabled;
+        let _ = self.config.save();
+    }
+
+    fn set_all_sound_channels(&mut self, enabled: bool) {
+        self.all_enabled = enabled;
+        self.triangle_enabled = enabled;
+        self.pulse1_enabled = enabled;
+        self.pulse2_enabled = enabled;
+        self.noise_enabled = enabled;
+        self.dmc_enabled = enabled;
+
+        let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundTriangle(enabled));
+        let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundPulse1(enabled));
+        let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundPulse2(enabled));
+        let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundNoise(enabled));
+        let _ = self.sender_to_emulator.send(ToEmulatorMessage::SoundDmc(enabled));
+        self.persist_sound_config();
     }
 
     // fn create_list_item(item: &str, id: usize, is_selected: bool) -> Element<AppMessage> {
@@ -579,6 +737,12 @@ impl App {
             .width(Length::Fixed(WIDTH as f32 * SCALE_X))
             .height(Length::Fixed(HEIGHT as f32 * SCALE_Y));
 
+        let canvas = mouse_area(canvas)
+            .on_move(AppMessage::CanvasHovered)
+            .on_exit(AppMessage::CanvasLeft);
+
+        let canvas: Element<'_, AppMessage> = canvas.into();
+
         let buttons = container(Column::new()
             .spacing(10)
             .width(Length::Fixed(150.0))
@@ -589,8 +753,26 @@ impl App {
                 AppMessage::TogglePause,
                 Some(Color::from_rgb(0.6, 0.5, 0.0)),
             ))
-            .push(m_button(crate::iced::next_minifb_upscale_algorithm_name(), AppMessage::Debug, Some(Color::from_rgb(0.2, 0.2, 0.8))))
-        )
+            .push(m_button(
+                "Debug",
+                AppMessage::ToggleDebug,
+                Some(if self.debug_active {
+                    Color::from_rgb(0.1, 0.7, 0.2)   // active: green
+                } else {
+                    Color::from_rgb(0.3, 0.3, 0.3)   // inactive: dark grey
+                }),
+            ))
+            // .push(m_button(crate::iced::next_minifb_upscale_algorithm_name(), AppMessage::Debug, Some(Color::from_rgb(0.2, 0.2, 0.8))))
+            .push(m_button(
+                "Grid",
+                AppMessage::ToggleGrid,
+                Some(if self.show_grid {
+                    Color::from_rgb(0.65, 0.65, 0.65)
+                } else {
+                    Color::from_rgb(0.35, 0.35, 0.35)
+                }),
+            ))
+         )
             .style(|_theme| {
                 container::Style {
                     background: Some(Color::from_rgb(0.2, 0.2, 0.2).into()),
@@ -617,15 +799,29 @@ impl App {
                                         .push(
                                             Column::new()
                                                 .spacing(10)
-                                                .push(checkbox("Triangle", self.triangle_enabled).on_toggle(AppMessage::TriangleToggled))
-                                                .push(checkbox("Pulse 1", self.pulse1_enabled).on_toggle(AppMessage::Pulse1Toggled))
-                                                .push(checkbox("Pulse 2", self.pulse2_enabled).on_toggle(AppMessage::Pulse2Toggled))
+                                                .push(
+                                                    checkbox(self.all_enabled)
+                                                        .label("All")
+                                                        .font(Font {
+                                                            weight: iced::font::Weight::Bold,
+                                                            ..Default::default()
+                                                        })
+                                                        .style(|theme, status| {
+                                                            let mut style = checkbox::primary(theme, status);
+                                                            style.text_color = Some(Color::from_rgb(1.0, 1.0, 0.0));
+                                                            style
+                                                        })
+                                                        .on_toggle(AppMessage::AllToggled)
+                                                )
+                                                .push(checkbox(self.triangle_enabled).label("Triangle").on_toggle(AppMessage::TriangleToggled))
+                                                .push(checkbox(self.noise_enabled).label("Noise").on_toggle(AppMessage::NoiseToggled))
                                         )
                                         .push(
                                             Column::new()
                                                 .spacing(10)
-                                                .push(checkbox("Noise", self.noise_enabled).on_toggle(AppMessage::NoiseToggled))
-                                                .push(checkbox("DMC", self.dmc_enabled).on_toggle(AppMessage::DmcToggled))
+                                                .push(checkbox(self.pulse1_enabled).label("Pulse 1").on_toggle(AppMessage::Pulse1Toggled))
+                                                .push(checkbox(self.pulse2_enabled).label("Pulse 2").on_toggle(AppMessage::Pulse2Toggled))
+                                                .push(checkbox(self.dmc_enabled).label("DMC").on_toggle(AppMessage::DmcToggled))
                                         )
                                 )
                                 .padding(10)
@@ -718,13 +914,12 @@ impl App {
     }
 
     fn apply_stick_y(joypad: &mut Joypad, value: f32) {
-        // This controller reports positive Y for up.
-        if value > Self::STICK_DEADZONE {
-            joypad.set_button_status(Button::Up, true);
-            joypad.set_button_status(Button::Down, false);
-        } else if value < -Self::STICK_DEADZONE {
+        if value < -Self::STICK_DEADZONE {
             joypad.set_button_status(Button::Down, true);
             joypad.set_button_status(Button::Up, false);
+        } else if value > Self::STICK_DEADZONE {
+            joypad.set_button_status(Button::Up, true);
+            joypad.set_button_status(Button::Down, false);
         } else {
             joypad.set_button_status(Button::Up, false);
             joypad.set_button_status(Button::Down, false);
@@ -752,6 +947,30 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
 {
     let shared_state = Arc::new(RwLock::new(SharedState::default()));
     let shared_state2 = shared_state.clone();
+    let fm2_movie = if let Some(fm2_file) = &args.fm2 {
+        let movie = Fm2Movie::parse_file(fm2_file).unwrap();
+        let rom = Rom::read_nes_file(&rom_info.file_name()).unwrap();
+        if let Some(false) = movie.rom_checksum_matches(&rom) {
+            warn!(
+                target: "fm2",
+                rom = %rom_info.file_name(),
+                rom_checksum = %rom.checksum,
+                movie_checksum = %movie.rom_checksum().unwrap_or_default(),
+                "FM2 movie ROM checksum does not match the loaded ROM"
+            );
+        }
+        Some(movie)
+    } else {
+        None
+    };
+
+    println!("Current directory: {}", std::env::current_dir().unwrap().display());
+    let mut bk2_movie = if let Some(bk2_file) = &args.bk2 {
+        let movie = Bk2Movie::parse_file(bk2_file).expect(&format!("File {bk2_file} should exist"));
+        Some(movie)
+    } else {
+        None
+    };
 
     let joypad = Arc::new(RwLock::new(Joypad::new()));
     let joypad2 = joypad.clone();
@@ -761,9 +980,37 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
         let mut reboot = false;
         let mut paused = false;
         let mut gilrs = Gilrs::new().ok();
+        // Keep the APU alive across reboots so we never recreate the audio device.
+        let mut carry_apu: Option<Arc<RwLock<crate::apu::Apu>>> = None;
         loop {
             let mut emulator = Emulator::new(rom_info.clone(),
-                shared_state.clone(), joypad2.clone(), args.clone());
+                shared_state.clone(), joypad2.clone(), args.clone(), carry_apu.take());
+
+            if let (Some(movie), Some(rom)) = (fm2_movie.as_ref(), emulator._rom.as_ref()) {
+                if let Some(false) = movie.rom_checksum_matches(rom) {
+                    warn!(
+                        target: "fm2",
+                        rom = %rom_info.file_name(),
+                        rom_checksum = %rom.checksum,
+                        movie_checksum = %movie.rom_checksum().unwrap_or_default(),
+                        "FM2 movie ROM checksum does not match the loaded ROM"
+                    );
+                }
+            }
+
+
+
+
+            // Apply persisted channel toggles for each fresh emulator instance (including reboots).
+            if let Ok(cfg) = EmulatorConfig::read_or_create() {
+                let mut apu = emulator.apu.write().unwrap();
+                apu.set_pulse1_enabled(cfg.sound_pulse1_enabled);
+                apu.set_pulse2_enabled(cfg.sound_pulse2_enabled);
+                apu.set_triangle_enabled(cfg.sound_triangle_enabled);
+                apu.set_noise_enabled(cfg.sound_noise_enabled);
+                apu.set_dmc_enabled(cfg.sound_dmc_enabled);
+            }
+
             let mut one_second_start = Instant::now();
             let mut sound_flush_start = Instant::now();
             let mut one_second_cycles = 0;
@@ -786,6 +1033,20 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
                                 emulator.frame_stats.clear();
                                 emulator.frame_count.clear();
                                 emulator.frame_count_last = Instant::now();
+
+                                if let Ok(mut state) = shared_state.write() {
+                                    if paused {
+                                        state.paused_cycle_count = emulator.cpu.get_cycles();
+                                        state.title = format!(
+                                            "{} - Paused - Cycle {} - {}",
+                                            WINDOW_TITLE,
+                                            state.paused_cycle_count,
+                                            state.rom_name
+                                        );
+                                    } else {
+                                        state.title = format!("{} - {}", WINDOW_TITLE, state.rom_name);
+                                    }
+                                }
                             }
                         }
                         ToEmulatorMessage::Debug => {
@@ -844,8 +1105,31 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
                     continue;
                 }
 
-                let cycles = emulator.tick();
+                let (cycles, frame_completed) = emulator.tick();
                 one_second_cycles += cycles;
+
+                // fm2
+                if let Some(movie) = &mut bk2_movie {
+                    if frame_completed {
+                        if let Some(frame) = movie.next_state() {
+                            // Apply full controller state every frame so releases are honored.
+                            // Using direct button mapping avoids stick helper deadzone/inversion logic.
+                            let mut joypad = joypad2.write().unwrap();
+                            joypad.set_button_status(Button::Up, frame.up);
+                            joypad.set_button_status(Button::Down, frame.down);
+                            joypad.set_button_status(Button::Left, frame.left);
+                            joypad.set_button_status(Button::Right, frame.right);
+                            joypad.set_button_status(Button::A, frame.a);
+                            joypad.set_button_status(Button::B, frame.b);
+                            joypad.set_button_status(Button::Start, frame.start);
+                            joypad.set_button_status(Button::Select, frame.select);
+
+                            if !frame.is_empty() {
+                                info!("Event: {}", frame);
+                            }
+                        }
+                    }
+                }
 
                 let elapsed = one_second_start.elapsed().as_millis();
                 let sound_elapsed = sound_flush_start.elapsed().as_millis();
@@ -873,8 +1157,8 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
                     // (if the divider is too high, it makes the emulator uncapped)
                     let divider = 30_u128;
                     // Divider = 10, caps = 40 fps, need to run 4 frames every 100ms
-                    let frame_cap_divided = cap as u128 / divider;
                     let time_wait_ms = 1000 / divider;
+                    let frame_cap_divided = cap as u128 / divider;
                     let frame_count = emulator.frame_count.len();
                     // let frame_count_divided = frame_count / divider as usize;
                     // info!("Frame count:{frame_count} time_wait:{time_wait_ms}");
@@ -900,6 +1184,8 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
                 }
 
             }
+            // Save the APU Arc so the audio device survives the reboot.
+            carry_apu = Some(emulator.apu.clone());
             reboot = false;
         }
     });

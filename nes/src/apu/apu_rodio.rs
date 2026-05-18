@@ -2,18 +2,19 @@ use crossbeam_queue::ArrayQueue;
 use std::num::NonZero;
 use std::sync::Arc;
 use rodio::{nz, ChannelCount, DeviceSinkBuilder, SampleRate, Source};
+use crate::constants::{DEBUG_ASM, SOUND};
 
 pub const OUTPUT_SAMPLE_RATE: u32 = 44_100;
 pub const AUDIO_QUEUE_CAPACITY: usize = 16_384;
 pub const AUDIO_PREROLL_SAMPLES: usize = 2_048;
-const RECOVERY_RAMP_SAMPLES: u8 = 32;
+const RECOVERY_RAMP_SAMPLES: u16 = 256;
 
 pub struct ApuSource {
     buffer: Arc<ArrayQueue<f32>>,
     sample_rate: u32,
     last_sample: f32,
     underrun_streak: u32,
-    recovery_blend_remaining: u8,
+    recovery_blend_remaining: u16,
 }
 
 impl ApuSource {
@@ -32,6 +33,10 @@ impl Iterator for ApuSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
+        if DEBUG_ASM || ! SOUND {
+            return None;
+        }
+
         if let Some(s) = self.buffer.pop() {
             if self.underrun_streak > 0 {
                 self.underrun_streak = 0;

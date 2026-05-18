@@ -7,7 +7,7 @@ use rayon::iter::ParallelIterator;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use tracing::{debug, info};
+use tracing::{debug};
 use walkdir::WalkDir;
 
 pub fn create_rom_item(is_selected: bool, item: RomInfo) -> Element<'static, Message> {

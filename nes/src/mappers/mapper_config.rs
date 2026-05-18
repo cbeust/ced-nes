@@ -17,6 +17,9 @@ pub struct MapperConfig {
     pub(crate) is_custom_prg: bool,
     pub(crate) is_custom_nametable: bool,
     pub(crate) on_read_chr_hook: bool,
+    /// True when the cartridge uses CHR RAM (writable) instead of CHR ROM.
+    /// Derived from the iNES header: chr_rom_count == 0 → CHR RAM.
+    pub(crate) has_chr_ram: bool,
 }
 
 impl Default for MapperConfig {
@@ -37,6 +40,7 @@ impl Default for MapperConfig {
             is_custom_prg: false,
             is_custom_nametable: false,
             on_read_chr_hook: false,
+            has_chr_ram: false,
         }
     }
 }
@@ -47,6 +51,7 @@ impl MapperConfig {
         result.total_prg_rom_size = rom.prg_rom.len();
         result.total_chr_rom_size = rom.chr_rom.len();
         result.mirroring = rom.header.mirroring;
+        result.has_chr_ram = rom.header.chr_rom_count == 0;
         result
     }
 

@@ -1,11 +1,12 @@
 use crate::color::PALETTE_TUPLES;
+use crate::config_file::EmulatorConfig;
 use crate::app::launch_emulator;
 use crate::constants::*;
 use crate::emulator::FRAME;
 use crate::{app, Args};
 use fast_image_resize as fr;
 use fast_image_resize::images::Image;
-use ::iced::{application, settings, window, Size, Task};
+use ::iced::{application, window, Settings, Size, Task};
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -31,7 +32,7 @@ pub(crate) fn next_minifb_upscale_algorithm_name() -> &'static str {
     }
 }
 
-fn minifb_resize_algorithm() -> fr::ResizeAlg {
+fn _minifb_resize_algorithm() -> fr::ResizeAlg {
     match MINIFB_UPSCALE_ALGORITHM_INDEX.load(Ordering::Relaxed) {
         0 => fr::ResizeAlg::Nearest,
         1 => fr::ResizeAlg::Convolution(fr::FilterType::Box),
@@ -42,15 +43,19 @@ fn minifb_resize_algorithm() -> fr::ResizeAlg {
     }
 }
 
-pub fn main_iced(args: Args, roms: Vec<RomInfo>, rom_info: RomInfo) {
+pub fn main_iced(args: Args, roms: Vec<RomInfo>, rom_info: RomInfo, config: EmulatorConfig) {
     let (sender_to_ui, _receiver_from_ui) = channel(10);
     let (sender_to_emulator, receiver_from_emulator) = channel(10);
     let (shared_state2, joypad) = launch_emulator(args.clone(), rom_info.clone(),
         sender_to_ui.clone(), receiver_from_emulator);
 
     let selected_rom_id = roms.iter().position(|rom| rom.id == rom_info.id);
-    let app = app::App::new(args, shared_state2, roms, selected_rom_id, sender_to_ui,
-        sender_to_emulator, joypad);
+    let args_for_app = args.clone();
+    let shared_state_for_app = shared_state2.clone();
+    let roms_for_app = roms.clone();
+    let sender_to_ui_for_app = sender_to_ui.clone();
+    let sender_to_emulator_for_app = sender_to_emulator.clone();
+    let joypad_for_app = joypad.clone();
 
    // launch_minifb_mirror();
 
@@ -59,20 +64,37 @@ pub fn main_iced(args: Args, roms: Vec<RomInfo>, rom_info: RomInfo) {
         resizable: true,  // Allow the user to resize the window
         ..window::settings::Settings::default()
     };
-    let settings = settings::Settings {
+    let settings = Settings {
         antialiasing: true,
-        ..settings::Settings::default()
+        ..Settings::default()
     };
     // let title = WindowTitle::new(receiver);
-    let _ = application(app::App::title, app::App::update, app::App::view)
+    let _ = application(
+        move || {
+            (
+                app::App::new(
+                    args_for_app.clone(),
+                    shared_state_for_app.clone(),
+                    roms_for_app.clone(),
+                    selected_rom_id,
+                    config.clone(),
+                    sender_to_ui_for_app.clone(),
+                    sender_to_emulator_for_app.clone(),
+                    joypad_for_app.clone(),
+                ),
+                Task::none(),
+            )
+        },
+        app::App::update,
+        app::App::view,
+    )
+        .title(app::App::title)
         .subscription(app::App::subscription)
         .settings(settings)
         .window(
             window_settings,
         )
-        .run_with(move || {
-            (app, Task::none())
-        });
+        .run();
     // iced::daemon(app.clone(), App::update, App::view)
     //     .settings(settings)
     //     .subscription(App::subscription)
@@ -81,7 +103,7 @@ pub fn main_iced(args: Args, roms: Vec<RomInfo>, rom_info: RomInfo) {
     //     }).unwrap()
 }
 
-fn launch_minifb_mirror() {
+fn _launch_minifb_mirror() {
     let _ = thread::Builder::new()
         .name("NES minifb mirror".to_string())
         .spawn(|| {
@@ -121,9 +143,8 @@ fn launch_minifb_mirror() {
                 .unwrap();
             let mut resizer = fr::Resizer::new();
             while window.is_open() && !window.is_key_down(Key::Escape) {
-                unsafe {
-                    let frame = &raw const FRAME;
-                    for (index, color) in (*frame).iter().enumerate() {
+                if let Ok(frame) = FRAME.read() {
+                    for (index, color) in frame.iter().enumerate() {
                         let (r, g, b) = PALETTE_TUPLES[*color as usize];
                         buffer[index] = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
                     }
@@ -141,7 +162,7 @@ fn launch_minifb_mirror() {
                 }
 
                 src_image.buffer_mut().copy_from_slice(&src_rgba);
-                let resize_options = fr::ResizeOptions::new().resize_alg(minifb_resize_algorithm());
+                let resize_options = fr::ResizeOptions::new().resize_alg(_minifb_resize_algorithm());
                 resizer.resize(&src_image, &mut dst_image, Some(&resize_options)).unwrap();
                 dst_rgba.copy_from_slice(dst_image.buffer());
 

@@ -88,6 +88,30 @@ impl IR {
         self.v = self.v.wrapping_add(inc) & 0x3fff;
     }
 
+    pub fn increment_vert_v(&mut self) {
+        if self.fine_y() < 7 {
+            self.increment_fine_y();
+        } else {
+            self.set_fine_y(0);
+            let mut coarse_y = self.coarse_y();
+            // if coarse_y == 31 {
+            //     println!("BP COARSE_Y");
+            // }
+            if coarse_y == 29 {
+                coarse_y = 0;
+                // let old = self.clone();
+                self.switch_vertical_nametable();
+                debug!(target: "ir", "Flipping vertical nametable, new:{}", self);
+                // println!();
+            } else if coarse_y == 31 {
+                coarse_y = 0; // coarse Y = 0, nametable not switched
+            } else {
+                coarse_y += 1; // increment coarse Y
+            }
+            self.set_coarse_y(coarse_y);
+        }
+    }
+
     pub fn set_v_to_t(&mut self) {
         debug!(target: "ir", "set_v_to_t IR:{}",self);
         self.v = self.t;

@@ -7,7 +7,6 @@ use tracing_appender::non_blocking;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use crate::mesen_logger::{LOG_CYCLE, LOG_SCANLINE};
 
 pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGuard> {
     use tracing_subscriber::EnvFilter;
@@ -42,8 +41,8 @@ pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGua
             } else {
                 write!(writer, "{}:{} - {:03},{:03} - {}\n",
                     metadata.level(), metadata.target(),
-                    *LOG_CYCLE.read().unwrap(),
-                    *LOG_SCANLINE.read().unwrap(),
+                    *CURRENT_CYCLE.read().unwrap(),
+                    *CURRENT_SCANLINE.read().unwrap(),
                     fields_buf)
             }
         }
@@ -60,9 +59,10 @@ pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGua
     let mapper_s = if MAPPER { "mapper=debug" } else { "mapper=off" };
     let vbl_s = if VBL { "vbl=debug" } else { "vbl=off" };
     let cpu_s = if CPU2_DEBUG { "cpu=debug" } else { "cpu=off" };
+    let ppu_s = if PPU { "ppu=debug" } else { "ppu=off" };
     let dmc_s = "dmc=off";
     let filter = EnvFilter::new(format!(
-        "info,{dmc_s},{cpu_s},{vbl_s},{ir_s},{vram_s},{rom_s},{mapper_s},ppu=off,sleep=off,oam=off,4014=off,frame=off,{ice_logs_off}"));
+        "info,{dmc_s},{cpu_s},{vbl_s},{ir_s},{vram_s},{rom_s},{mapper_s},{ppu_s},sleep=off,oam=off,4014=off,frame=off,{ice_logs_off}"));
 
     if let Some(file_name) = log_to_file {
         let dir = format!("{}\\t", dirs::home_dir().unwrap().to_str().unwrap());

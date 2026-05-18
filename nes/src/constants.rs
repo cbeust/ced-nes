@@ -12,6 +12,7 @@ pub const DEBUG_MESEN: bool = false;
 pub const LOG_TO_FILE: bool = DEBUG;
 pub const USE_ICED: bool = true;
 pub const SELECTED_ROM: usize = 400;
+pub const SOUND: bool = true;
 
 // Logging
 pub const IR: bool = false;
@@ -19,6 +20,7 @@ pub const VRAM: bool = false;
 pub const ROM: bool = false;
 pub const MAPPER: bool = false;
 pub const VBL: bool = false;
+pub const PPU: bool = false;
 
 // Screen
 pub const WIDTH: usize = 256;
@@ -172,9 +174,9 @@ pub static ROM_NAMES: Lazy<Vec<RomInfo>> = Lazy::new(|| {
         RomInfo::n(554, "04.flip.nes"),
         RomInfo::n(555, "05.left_clip.nes"),
         RomInfo::n(556, "06.right_edge.nes"),
-        RomInfo::n(557, "07.screen_bottom.nes"), // fail
+        RomInfo::n(557, "07.screen_bottom.nes"),
         RomInfo::n(558, "08.double_height.nes"),
-        RomInfo::n(559, "09.timing_basics.nes"), // fail
+        RomInfo::n(559, "09.timing_basics.nes"),
         RomInfo::n(561, "palette_ram.nes"),
         RomInfo::n(562, "sprite_ram.nes"),
         RomInfo::n(582, "1.Branch_Basics.nes"),

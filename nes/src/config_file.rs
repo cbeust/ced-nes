@@ -12,8 +12,23 @@ const CONFIG_FILE: &str = "config.json";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EmulatorConfig {
+    #[serde(default)]
     pub rom_dir: Option<String>,
+    #[serde(default = "default_true")]
+    pub sound_all_enabled: bool,
+    #[serde(default = "default_true")]
+    pub sound_triangle_enabled: bool,
+    #[serde(default = "default_true")]
+    pub sound_pulse1_enabled: bool,
+    #[serde(default = "default_true")]
+    pub sound_pulse2_enabled: bool,
+    #[serde(default = "default_true")]
+    pub sound_noise_enabled: bool,
+    #[serde(default = "default_true")]
+    pub sound_dmc_enabled: bool,
 }
+
+fn default_true() -> bool { true }
 
 // C:\\users\\cedric\\t
 
@@ -23,7 +38,15 @@ impl Default for EmulatorConfig {
         // dir.push("t");
         // dir.push("roms");
         // Self { rom_dir: Some(dir.to_string_lossy().into()) }
-        Self { rom_dir: None }
+        Self {
+            rom_dir: None,
+            sound_all_enabled: true,
+            sound_triangle_enabled: true,
+            sound_pulse1_enabled: true,
+            sound_pulse2_enabled: true,
+            sound_noise_enabled: true,
+            sound_dmc_enabled: true,
+        }
     }
 }
 impl EmulatorConfig {

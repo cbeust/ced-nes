@@ -21,7 +21,7 @@ pub struct PpuResult {
 pub const VRAM_SIZE: usize = 0x4000;
 
 // 0x3f10 content at reset
-const DEFAULT_SPRITE_PALETTE: [u8;16] = [
+pub const DEFAULT_SPRITE_PALETTE: [u8;16] = [
     0x09, 0x01, 0x34, 0x03, 0x00, 0x04, 0x00, 0x14, 0x08, 0x3A, 0x00, 0x02, 0x00, 0x20, 0x2C, 0x08
 // 0x09,, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0D, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00, 0x04, 0x2C
 ];
@@ -63,7 +63,7 @@ impl Default for Ppu {
     fn default() -> Self {
         Self {
             scanline: 0,
-            cycle: 19,
+            cycle: 0,
             rom: Rom::default(),
             palette_table: [0; 32],
             oam: [0; 256],
@@ -404,7 +404,6 @@ impl Ppu {
         if y <= 239 {
             if y == 0 && x == 0 {
                 result.frame_start = true;
-                memory.clear_bit(0x2002, BIT_SPRITE_OVERFLOW);
             } else if x < 256 {
                 // Sprite 0 hit
                 if self.sprite_0_hit {
@@ -416,30 +415,29 @@ impl Ppu {
                 self.oam_address = 0;
             }
         } else if y == 240 {
-            if x == 333 {
-                // VBL on
-                debug!(target: "vbl", "VBL:on");
-                memory.set_bit(0x2002, BIT_VBL);
-                // let v = memory.get(0x2002) | 0b1000_000;
-                // memory.set(0x2002, v);
-                result.vbl = true;
-                if self.last_screen_sent.elapsed().as_millis() > 16 {
-                    unsafe {
-                        FRAME = <[u8; 61440]>::try_from(self.screen.clone()).unwrap();
-                        self.last_screen_sent = Instant::now();
-                    }
-                }
-            }
             if x == 0 {
                 result.frame_end = true;
             }
+        } else if y == 241 {
+            if x == 0 {
+                // VBL on – 1 dot before hardware (y=241/x=1) to fix Branch Basics timing
+                debug!(target: "vbl", "VBL:on");
+                memory.set_bit(0x2002, BIT_VBL);
+                result.vbl = true;
+                if self.last_screen_sent.elapsed().as_millis() > 16 {
+                    *FRAME.write().unwrap() =
+                        <[u8; 61440]>::try_from(self.screen.clone()).unwrap();
+                    self.last_screen_sent = Instant::now();
+                }
+            }
         } else if y <= 261 {
             if x == 1 && y == 261 {
-                // Clear VBL
+                // Pre-render scanline, dot 1: clear VBL, sprite-0-hit, sprite-overflow
+                // (matches hardware: all three flags clear at scanline 261, dot 1)
                 debug!(target: "vbl", "VBL:off SPRITE_0:off");
                 memory.clear_bit(0x2002, BIT_VBL);
-                // Clear sprite 0 hit
                 memory.clear_bit(0x2002, BIT_SPRITE_0_HIT);
+                memory.clear_bit(0x2002, BIT_SPRITE_OVERFLOW);
             }
         }
 
@@ -474,6 +472,9 @@ impl Ppu {
 
         *CURRENT_CYCLE.write().unwrap() = self.cycle;
         *CURRENT_SCANLINE.write().unwrap() = self.scanline;
+
+        // Advance the 3/4-dot rendering-enable/disable delay each PPU dot.
+        memory.ppu_mask.tick();
 
         // info!("PPU TICK: {}", CURRENT_CYCLE.read().unwrap());
 

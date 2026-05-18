@@ -19,7 +19,6 @@ pub struct MapperMMC1 {
     prg_bank: u8,
     // 0-3
     nametable_arrangement: u8,
-    last_cycle_write: u128,
 }
 
 impl MapperMMC1 {
@@ -38,7 +37,6 @@ impl MapperMMC1 {
             chr_bank1: 0,
             prg_bank: 0,
             nametable_arrangement: 0,
-            last_cycle_write: 0,
         }
     }
 }
