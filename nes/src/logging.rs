@@ -1,5 +1,5 @@
 use crate::constants::*;
-use crate::ppu::{CURRENT_CYCLE, CURRENT_SCANLINE};
+use crate::ppu2::{CURRENT_CYCLE, CURRENT_SCANLINE};
 use cpu::cpu2::CPU2_DEBUG;
 use rolling_file::{RollingConditionBasic, RollingFileAppender};
 use std::fs::File;
@@ -60,9 +60,10 @@ pub fn init_logging(log_to_file: Option<String>, asyn: bool) -> Option<WorkerGua
     let vbl_s = if VBL { "vbl=debug" } else { "vbl=off" };
     let cpu_s = if CPU2_DEBUG { "cpu=debug" } else { "cpu=off" };
     let ppu_s = if PPU { "ppu=debug" } else { "ppu=off" };
+    let oam_s = if OAM { "oam=debug" } else { "oam=off" };
     let dmc_s = "dmc=off";
     let filter = EnvFilter::new(format!(
-        "info,{dmc_s},{cpu_s},{vbl_s},{ir_s},{vram_s},{rom_s},{mapper_s},{ppu_s},sleep=off,oam=off,4014=off,frame=off,{ice_logs_off}"));
+        "info,{dmc_s},{cpu_s},{vbl_s},{ir_s},{vram_s},{rom_s},{mapper_s},{ppu_s},sleep=off,{oam_s},4014=off,frame=off,{ice_logs_off}"));
 
     if let Some(file_name) = log_to_file {
         let dir = format!("{}\\t", dirs::home_dir().unwrap().to_str().unwrap());

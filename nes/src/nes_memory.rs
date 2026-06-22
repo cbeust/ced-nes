@@ -8,7 +8,7 @@ use tracing::{debug};
 
 pub const MEMORY_SIZE: usize = 65_536;
 
-use crate::ppu::{BIT_SPRITE_OVERFLOW, BIT_VBL};
+use crate::ppu2::{BIT_SPRITE_OVERFLOW, BIT_VBL};
 use crate::ppu2::Ppu2;
 use crate::ppu_ctrl::PpuCtrl;
 use crate::ppu_mask::PpuMask;
@@ -24,9 +24,6 @@ pub struct NesMemory{
     pub ppu_mask: PpuMask,
     pub joypad: Arc<RwLock<Joypad>>,
 
-    #[cfg(feature = "ppu1")]
-    ppu: Arc<RwLock<Ppu>>,
-    #[cfg(not(feature = "ppu1"))]
     ppu: Arc<RwLock<Ppu2>>,
 
     apu: Arc<RwLock<Apu>>,
@@ -39,11 +36,7 @@ impl NesMemory{
     pub fn new(mapper: MapperBase,
         joypad: Arc<RwLock<Joypad>>,
 
-        #[cfg(not(feature = "ppu1"))]
         ppu: Arc<RwLock<Ppu2>>,
-
-        #[cfg(feature = "ppu1")]
-        ppu: Arc<RwLock<Ppu>>,
 
         apu: Arc<RwLock<Apu>>,
     ) -> Self
@@ -72,9 +65,6 @@ impl NesMemory{
     }
 
     pub fn new_for_testing() -> Self {
-        #[cfg(feature = "ppu1")]
-        let ppu = Arc::new(RwLock::new(Ppu::default()));
-        #[cfg(not(feature = "ppu1"))]
         let ppu = Arc::new(RwLock::new(Ppu2::default()));
         let mut result =
             NesMemory::new(MapperBase::default(),
@@ -143,6 +133,10 @@ impl NesMemory{
                 } else {
                     VramB
                  }
+            }
+            Mirroring::FourScreen => {
+                // Four-screen boards provide distinct backing for all 4 nametables.
+                Vram
             }
             Mirroring::ScreenA => {
                 VramA

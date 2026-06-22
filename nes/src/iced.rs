@@ -21,7 +21,7 @@ pub(crate) fn cycle_minifb_upscale_algorithm() {
     MINIFB_UPSCALE_ALGORITHM_INDEX.store(next, Ordering::Relaxed);
 }
 
-pub(crate) fn next_minifb_upscale_algorithm_name() -> &'static str {
+pub(crate) fn _next_minifb_upscale_algorithm_name() -> &'static str {
     match (MINIFB_UPSCALE_ALGORITHM_INDEX.load(Ordering::Relaxed) + 1) % UPSCALE_ALGORITHM_COUNT {
         0 => "Nearest",
         1 => "Box",

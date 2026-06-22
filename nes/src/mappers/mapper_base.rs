@@ -10,7 +10,7 @@ use crate::mappers::mapper_mmc2::MapperMMC2;
 use crate::mappers::mapper_mmc3::MapperMMC3;
 use crate::mappers::mapper_uxrom::MapperUxROM;
 use crate::nes_memory::NesMemory;
-use crate::ppu::VRAM_SIZE;
+use crate::ppu2::VRAM_SIZE;
 use crate::rom::{Mirroring, Rom, CHR_ROM_SIZE};
 use tracing::info;
 

@@ -16,10 +16,11 @@ pub struct MapperMMC3 {
     irq_counter: u8,
     irq_reload: bool,
     irq_enabled: bool,
+    can_control_mirroring: bool,
 }
 
 impl MapperMMC3 {
-    pub fn new(_rom: &Rom, config: &mut MapperConfig) -> Self {
+    pub fn new(rom: &Rom, config: &mut MapperConfig) -> Self {
         config.set_prg_bank_size(0x2000);
         config.set_chr_bank_size(0x400);
         config.set_prg_bank(3, config.get_prg_bank_count() - 1);
@@ -33,6 +34,7 @@ impl MapperMMC3 {
             irq_counter: 0,
             irq_reload: false,
             irq_enabled: false,
+            can_control_mirroring: rom.header.mirroring != Mirroring::FourScreen,
         }
     }
 }
@@ -70,12 +72,14 @@ impl Mapper for MapperMMC3 {
             0xa000..=0xbfff => {
                 debug!(target: "mapper", "    (TBD) write_prg nametable/PRG RAM protect");
                 if even {
-                    let mirroring = if (data & 1) == 1 {
-                        Mirroring::Horizontal
-                    } else {
-                        Mirroring::Vertical
-                    };
-                    config.set_mirroring(mirroring);
+                    if self.can_control_mirroring {
+                        let mirroring = if (data & 1) == 1 {
+                            Mirroring::Horizontal
+                        } else {
+                            Mirroring::Vertical
+                        };
+                        config.set_mirroring(mirroring);
+                    }
                 } else {
                     // warn!("PRG RAM PROTECT NOT IMPLEMENTED");
                 }
@@ -83,7 +87,7 @@ impl Mapper for MapperMMC3 {
             0xc000..=0xdfff => {
                 if even {
                     debug!(target: "mapper", "    IRQ load_value: {data:02X}");
-                    self.irq_load_value = if data > 0 { data - 1 } else { data }
+                    self.irq_load_value = data;
                 } else {
                     debug!(target: "mapper", "    IRQ counter: 0, reload: true");
                     self.irq_counter = 0;
@@ -159,3 +163,34 @@ pub fn _test_mapper3() {
     assert_eq!(mapper.read_prg(0xc79e), 0x78);
     assert_eq!(mapper.read_prg(0xf092), 0x85);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mmc3_changes_mirroring_on_a000_even_for_regular_boards() {
+        let mut rom = Rom::default();
+        rom.header.mirroring = Mirroring::Vertical;
+        let mut config = MapperConfig::new(&rom);
+        let mut mapper = MapperMMC3::new(&rom, &mut config);
+
+        mapper.write_prg(0xA000, 0x01, &mut config);
+        assert_eq!(config.mirroring, Mirroring::Horizontal);
+
+        mapper.write_prg(0xA000, 0x00, &mut config);
+        assert_eq!(config.mirroring, Mirroring::Vertical);
+    }
+
+    #[test]
+    fn mmc3_keeps_four_screen_mirroring_fixed() {
+        let mut rom = Rom::default();
+        rom.header.mirroring = Mirroring::FourScreen;
+        let mut config = MapperConfig::new(&rom);
+        let mut mapper = MapperMMC3::new(&rom, &mut config);
+
+        mapper.write_prg(0xA000, 0x01, &mut config);
+        assert_eq!(config.mirroring, Mirroring::FourScreen);
+    }
+}
+

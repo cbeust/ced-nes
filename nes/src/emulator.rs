@@ -5,7 +5,7 @@ use crate::joypad::Joypad;
 use crate::mappers::mapper_base::MapperBase;
 use crate::mesen_logger::{MesenLogger, LOG_CYCLE, LOG_SCANLINE};
 use crate::nes_memory::NesMemory;
-use crate::ppu::{PpuResult, CURRENT_CYCLE, CURRENT_SCANLINE};
+use crate::ppu2::{PpuResult, CURRENT_CYCLE, CURRENT_SCANLINE};
 use crate::rom::Rom;
 use crate::Args;
 use cpu::config::{Config, System};
@@ -93,11 +93,7 @@ pub struct Emulator {
     // pub cpu: Cpu<NesMemory>,
     pub(crate) cpu: CpuType,
 
-    #[cfg(not(feature = "ppu1"))]
     pub(crate) ppu: Arc<RwLock<Ppu2>>,
-
-    #[cfg(feature = "ppu1")]
-    pub(crate) ppu: Arc<RwLock<Ppu>>,
 
     pub(crate) apu: Arc<RwLock<Apu>>,
     pub _rom: Option<Rom>,
@@ -163,9 +159,6 @@ impl Emulator {
             ..Default::default()
         };
         let mut mapper = MapperBase::new(&rom);
-        #[cfg(feature = "ppu1")]
-        let ppu = Arc::new(RwLock::new(Ppu::new(&mut mapper)));
-        #[cfg(not(feature = "ppu1"))]
         let ppu = Arc::new(RwLock::new(Ppu2::new(&mut mapper)));
         // Reuse the existing APU (and its audio device) when rebooting so we never
         // tear down / recreate the rodio stream, which would cause a click.
@@ -205,11 +198,7 @@ impl Emulator {
         let apu2 = apu.clone();
         Self {
             cpu,
-            #[cfg(not(feature = "ppu1"))]
             ppu: ppu2,
-
-            #[cfg(feature = "ppu1")]
-            ppu,
 
             apu: apu2,
             _rom: Some(rom),

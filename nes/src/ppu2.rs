@@ -1,10 +1,32 @@
 use crate::emulator::FRAME;
 use crate::mappers::mapper_base::MapperBase;
 use crate::nes_memory::NesMemory;
-use crate::ppu::{PpuResult, BIT_SPRITE_0_HIT, BIT_SPRITE_OVERFLOW, BIT_VBL, CURRENT_CYCLE, CURRENT_SCANLINE};
 use std::time::Instant;
 use tracing::{info};
 use crate::delayed::Delayed;
+use once_cell::sync::Lazy;
+use std::sync::RwLock;
+
+#[derive(Default)]
+pub struct PpuResult {
+    pub vbl: bool,
+    pub frame_start: bool,
+    pub frame_end: bool,
+    pub irq_requested: bool,
+}
+
+pub const VRAM_SIZE: usize = 0x4000;
+
+pub const DEFAULT_SPRITE_PALETTE: [u8;16] = [
+    0x09, 0x01, 0x34, 0x03, 0x00, 0x04, 0x00, 0x14, 0x08, 0x3A, 0x00, 0x02, 0x00, 0x20, 0x2C, 0x08
+];
+
+pub static CURRENT_CYCLE: Lazy<RwLock<u16>> = Lazy::new(|| RwLock::new(0));
+pub static CURRENT_SCANLINE: Lazy<RwLock<u16>> = Lazy::new(|| RwLock::new(0));
+
+pub const BIT_SPRITE_OVERFLOW: u8 = 5;
+pub const BIT_SPRITE_0_HIT: u8 = 6;
+pub const BIT_VBL: u8 = 7;
 
 /// $2000 | (v & $0FFF)
 const NT: u16 = 1 << 1;
@@ -44,11 +66,8 @@ pub struct Ppu2 {
     delayed_pixels: Delayed<(usize, u8)>,
     _delayed_sprite_colors: Delayed<u8>,
 
-    x: u16,
+    pub x: u16,
     pub scanline: u16,
-    /// Current NT byte
-    nt: u8,
-    at: u16,
 
     // Where we store the sprites we detected will appear on the next scanline, max 32
     oam2: [u8; 32],
@@ -78,9 +97,6 @@ pub struct Ppu2 {
     pattern_shift_high: u16,
     attr_shift_low: u16,
     attr_shift_high: u16,
-    /// Fine X scroll latched at dot 0 of each scanline. This ensures that
-    /// mid-frame scroll changes via $2005 don't misalign the pre-fetched tile data.
-    fine_x_latched: u8,
     last_screen_sent: Instant,
     sprite_0_hit_delay: i8,
 }
@@ -102,8 +118,6 @@ impl Ppu2 {
             _delayed_sprite_colors: Delayed::new(2),
             x: 0,
             scanline: 0,
-            nt: 0,
-            at: 0,
             oam2: [0; 32],
             oam2_source_index: [0; 8],
             oam2_eval_index: 0,
@@ -122,13 +136,12 @@ impl Ppu2 {
             pattern_shift_high: 0,
             attr_shift_low: 0,
             attr_shift_high: 0,
-            fine_x_latched: 0,
             last_screen_sent: Instant::now(),
             sprite_0_hit_delay: -1,
         };
 
-        for i in 0..crate::ppu::DEFAULT_SPRITE_PALETTE.len() {
-            result.set_vram(0x3f10 + i, crate::ppu::DEFAULT_SPRITE_PALETTE[i], mapper);
+        for i in 0..DEFAULT_SPRITE_PALETTE.len() {
+            result.set_vram(0x3f10 + i, DEFAULT_SPRITE_PALETTE[i], mapper);
         }
 
         result
@@ -138,6 +151,7 @@ impl Ppu2 {
         memory: &mut NesMemory) -> PpuResult
     {
         let mut result = PpuResult::default();
+        let mut irq_requested = false;
         let event = self.events[self.event_index];
 
         // Keep PPUMASK delayed enable/disable timing moving one dot per PPU tick.
@@ -146,6 +160,15 @@ impl Ppu2 {
         let ei = self.event_index;
         let dot_x = (ei % WIDTH) as u16;
         let dot_scanline = (ei / WIDTH) as u16;
+
+        // Keep mapper cycle-based hooks in sync with legacy PPU timing.
+        if (ei % 3) == 0 {
+            irq_requested |= memory.mapper.on_cpu_cycle();
+        }
+        let rendering_enabled_now = background_rendering || sprite_rendering;
+        if rendering_enabled_now && dot_scanline < 240 && dot_x == 260 {
+            irq_requested |= memory.mapper.on_scanline();
+        }
 
         if dot_scanline == 0 && dot_x == 0 {
             result.frame_start = true;
@@ -190,14 +213,8 @@ impl Ppu2 {
         if dot_scanline < crate::constants::HEIGHT as u16
             && dot_x < crate::constants::WIDTH as u16
         {
-            // At dot 0 of each visible scanline, latch fine_x so that any mid-frame
-            // scroll changes via $2005 don't misalign the pre-fetched tile data.
-            if dot_x == 0 {
-                self.fine_x_latched = memory.ir.x;
-            }
-
             // Emit pixel for visible area only
-            let fine_x = self.fine_x_latched as u16;
+            let fine_x = memory.ir.x as u16;
             let bit_pos = 15u16.saturating_sub(fine_x);
             let bit0 = (self.pattern_shift_low  >> bit_pos) & 1;
             let bit1 = (self.pattern_shift_high >> bit_pos) & 1;
@@ -299,7 +316,7 @@ impl Ppu2 {
 
         // Only update scrolling v/t state while rendering is enabled on
         // visible or pre-render scanlines.
-        let rendering_enabled = background_rendering || sprite_rendering;
+        let rendering_enabled = rendering_enabled_now;
         let can_update_scroll_v = rendering_enabled && (dot_scanline < 240 || dot_scanline == 261);
 
         // Process event
@@ -489,6 +506,7 @@ impl Ppu2 {
             }
         }
 
+        result.irq_requested = irq_requested;
         result
     }
 
@@ -498,29 +516,27 @@ impl Ppu2 {
             result[i] = 0;
         }
 
-        // First row
+        // Row 0
         for x in (0..256).step_by(8) {
-            let index = x;
-            result[index + 1] = NT;
-            result[index + 3] = AT;
-            result[index + 5] = BG_LSBITS;
-            result[index + 7] = BG_MSBITS;
-            result[index + 8] = INC_HORIZ_V;
-        }
-
-        for x in (321..337).step_by(8) {
-            let index = x;
-            result[index + 1] = NT;
-            result[index + 3] = AT;
-            result[index + 5] = BG_LSBITS;
-            result[index + 7] = BG_MSBITS;
-            result[index + 8] = INC_HORIZ_V;
+            result[x + 1] = NT;
+            result[x + 3] = AT;
+            result[x + 5] = BG_LSBITS;
+            result[x + 7] = BG_MSBITS;
+            result[x + 8] = INC_HORIZ_V;
         }
 
         result[256] |= INC_VERT_V;
         result[257] |= HORI_V_EQUALS_HORI_T;
 
-        // Copy row 0 to row 1..239
+        for x in (321..337).step_by(8) {
+            result[x + 1] = NT;
+            result[x + 3] = AT;
+            result[x + 5] = BG_LSBITS;
+            result[x + 7] = BG_MSBITS;
+            result[x + 8] = INC_HORIZ_V;
+        }
+
+        // Copy row 0 to rows 1..239
         for y in 1..240 {
             for x in 0..WIDTH {
                 result[y * WIDTH + x] = result[x];
@@ -528,10 +544,10 @@ impl Ppu2 {
         }
 
         // Row 241 (just set VBL)
-        // Fire VBL at dot 0 (one dot before hardware's dot 1) to match ppu1 timing.
+        // Fire VBL at dot 0 (one dot before hardware's dot 1).
         // 241*341 = 82181, and 82181 % 3 == 2 (last PPU tick of a CPU-cycle batch),
         // so the NMI reaches the CPU one cycle earlier than dot 1 — necessary for
-        // Branch Basics timing test to pass (same fix as ppu1).
+        // Branch Basics timing test to pass
         result[241 * WIDTH + 0] = SET_VBLANK_FLAG;
 
         // Row 261 (pre render line)
@@ -610,8 +626,12 @@ impl Ppu2 {
         let after = NesMemory::ppu_mirrorring(address as u16) as usize;
         if (0x2000..=0x2fff).contains(&after) {
             mapper.read_nametable(after)
-        } else if address >= 0x3f00 {
-            self.palette_table[after & 0x1f]
+        } else if after >= 0x3f00 {
+            let mut idx = after & 0x1f;
+            if idx >= 0x10 && (idx & 3) == 0 {
+                idx -= 0x10;
+            }
+            self.palette_table[idx]
         } else {
             mapper.read_chr(after as u16)
         }
@@ -621,8 +641,12 @@ impl Ppu2 {
         let after = NesMemory::ppu_mirrorring(address as u16) as usize;
         if (0x2000..=0x2fff).contains(&after) {
             mapper.write_nametable(after, value);
-        } else if address >= 0x3f00 {
-            self.palette_table[after & 0x1f] = value & 0x3f;
+        } else if after >= 0x3f00 {
+            let mut idx = after & 0x1f;
+            if idx >= 0x10 && (idx & 3) == 0 {
+                idx -= 0x10;
+            }
+            self.palette_table[idx] = value & 0x3f;
         } else {
             mapper.write_chr(after as u16, value);
         }

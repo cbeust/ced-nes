@@ -5,7 +5,7 @@ use crate::config::{Config, System};
 use crate::constants;
 use crate::constants::*;
 use crate::cpu::{StatusFlags, LOG_ASYNC};
-use crate::external_logger::{IExternalLogger};
+use crate::external_logger::{DefaultLogger, IExternalLogger};
 use crate::log_file::LogFile;
 use crate::memory::Memory;
 use crate::messages::LogMsg;
@@ -1887,4 +1887,142 @@ impl<T: Memory> Cpu2<T> {
             self.memory.set(self.current_address, value);
         }
     }
+
+    pub fn save_state(&mut self) -> CpuState {
+        let mut memory = [0_u8; 0x8000];
+        // Save the first 32 KiB backing RAM used by this CPU state snapshot.
+        for address in 0..0x8000_u16 {
+            memory[address as usize] = self.memory.get_direct(address);
+        }
+
+        CpuState {
+            memory,
+            a: self.a,
+            x: self.x,
+            y: self.y,
+            _pc: self._pc,
+            s: self.s,
+            p: self.p,
+            current_cycle: self.current_cycle,
+            cycles: self.cycles,
+            finished: self.finished,
+            current_opcode: self.current_opcode,
+            current_value: self.current_value,
+            current_address: self.current_address,
+            page_crossed: self.page_crossed,
+            instruction_cycles: self.instruction_cycles,
+            pending_interrupt: self.pending_interrupt,
+            pc_was_changed: self.pc_was_changed,
+            system: self.system.clone(),
+            is_get_phase: self.is_get_phase,
+        }
+    }
+
+    pub fn restore_state(state: &CpuState) -> Cpu2<T> where T: Memory + Default {
+        let log_file = Some(Box::new(DefaultLogger::default()) as Box<dyn IExternalLogger>);
+        let mut result = Cpu2::new(T::default(), &Config::default(), log_file);
+        for address in 0..0x8000_u16 {
+            result.memory.set_force(address, state.memory[address as usize]);
+        }
+        result.p = state.p.clone();
+        result.a = state.a;
+        result.x = state.x;
+        result.y = state.y;
+        result.s = state.s;
+        result._pc = state._pc;
+        result.finished = state.finished;
+        result.pending_interrupt = state.pending_interrupt;
+        result.current_opcode = state.current_opcode;
+        result.current_cycle = state.current_cycle;
+        result.current_address = state.current_address;
+        result.current_value = state.current_value;
+        result.page_crossed = state.page_crossed;
+        result.instruction_cycles = state.instruction_cycles;
+        result.cycles = state.cycles;
+        result.pending_interrupt = state.pending_interrupt;
+        result.pc_was_changed = state.pc_was_changed;
+        result.system = state.system.clone();
+        result.is_get_phase = state.is_get_phase;
+        result
+    }
 }
+
+pub struct CpuState {
+    pub memory: [u8; 0x8000],
+    pub a: u8,
+    pub x: u8,
+    pub y: u8,
+    pub _pc: u16,
+    pub s: u8,
+    pub p: StatusFlags,
+    /// 0...7
+    current_cycle: usize,
+    pub cycles: u128,
+    finished: bool,
+    current_opcode: u8,
+    current_value: u8,
+    current_address: u16,
+    page_crossed: bool,
+    // Number of cycles in the current instruction. Only accurate when finished = true
+    instruction_cycles: u8,
+
+    // (low, high)
+    pending_interrupt: Option<(u16, u16)>,
+    pc_was_changed: bool,
+    system: System,
+
+    pub is_get_phase: bool,
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn save_and_restore_round_trip_preserves_state() {
+        let mut cpu = Cpu2::new(Cpu2Memory::default(), &Config::default(), None);
+        cpu.memory.set_force(0x0010, 0xAA);
+        cpu.memory.set_force(0x7FFF, 0x55);
+        cpu.a = 0x11;
+        cpu.x = 0x22;
+        cpu.y = 0x33;
+        cpu.s = 0x44;
+        cpu._pc = 0xC123;
+        cpu.p.set_value(0b1010_0011);
+        cpu.current_cycle = 3;
+        cpu.cycles = 42;
+        cpu.finished = false;
+        cpu.current_opcode = 0xEA;
+        cpu.current_value = 0x99;
+        cpu.current_address = 0x3456;
+        cpu.page_crossed = true;
+        cpu.instruction_cycles = 7;
+        cpu.pending_interrupt = Some((0xAA, 0xBB));
+        cpu.pc_was_changed = true;
+        cpu.is_get_phase = false;
+
+        let state = cpu.save_state();
+        let mut restored: Cpu2<Cpu2Memory> = Cpu2::restore_state(&state);
+
+        assert_eq!(restored.memory.get_direct(0x0010), 0xAA);
+        assert_eq!(restored.memory.get_direct(0x7FFF), 0x55);
+        assert_eq!(restored.a, 0x11);
+        assert_eq!(restored.x, 0x22);
+        assert_eq!(restored.y, 0x33);
+        assert_eq!(restored.s, 0x44);
+        assert_eq!(restored._pc, 0xC123);
+        assert_eq!(restored.p.value(), cpu.p.value());
+        assert_eq!(restored.current_cycle, 3);
+        assert_eq!(restored.cycles, 42);
+        assert!(!restored.finished);
+        assert_eq!(restored.current_opcode, 0xEA);
+        assert_eq!(restored.current_value, 0x99);
+        assert_eq!(restored.current_address, 0x3456);
+        assert!(restored.page_crossed);
+        assert_eq!(restored.instruction_cycles, 7);
+        assert_eq!(restored.pending_interrupt, Some((0xAA, 0xBB)));
+        assert!(restored.pc_was_changed);
+        assert!(!restored.is_get_phase);
+    }
+}
+

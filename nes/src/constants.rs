@@ -10,17 +10,22 @@ pub const CPU_TYPE_NEW: bool = true;
 pub const _COMPARE_LOGS: bool = true;
 pub const DEBUG_MESEN: bool = false;
 pub const LOG_TO_FILE: bool = DEBUG;
-pub const USE_ICED: bool = true;
+#[allow(dead_code)]
+pub enum Library {
+    Iced, Vizia, MiniFb,
+}
+pub const LIBRARY: Library = Library::Vizia;
 pub const SELECTED_ROM: usize = 400;
 pub const SOUND: bool = true;
 
 // Logging
 pub const IR: bool = false;
-pub const VRAM: bool = false;
+pub const VRAM: bool = DEBUG;
 pub const ROM: bool = false;
-pub const MAPPER: bool = false;
+pub const MAPPER: bool = DEBUG;
 pub const VBL: bool = false;
 pub const PPU: bool = false;
+pub const OAM: bool = DEBUG;
 
 // Screen
 pub const WIDTH: usize = 256;
@@ -28,7 +33,7 @@ pub const HEIGHT: usize = 240;
 pub const SCALE_X: f32 = 2.0;
 pub const SCALE_Y: f32 = 2.0;
 
-// pub const ALL_MAPPERS: [u8; 1] = [9];
+// pub const ALL_MAPPERS: [u8; 1] = [1];
 pub const ALL_MAPPERS: [u8; 9] = [0, 1, 2, 3, 4, 7, 9, 19, 66];
 pub const DEMO_DELAY_SECONDS: u64 = 8;
 

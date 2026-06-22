@@ -217,12 +217,14 @@ pub enum AppMessage {
     Update(f32, u16),
     RomSelected(usize),
     Reboot,
+    SaveState,
+    RestoreState,
     TogglePause,
     ToggleGrid,
     CanvasHovered(Point),
     CanvasLeft,
     ToggleDebug,
-    Debug,
+    _Debug,
     RebootRandom,
     FilterTextChanged(String),
     AllToggled(bool),
@@ -244,6 +246,8 @@ pub enum ToUiMessage {
 #[derive(Clone)]
 pub enum ToEmulatorMessage {
     Reboot(RomInfo),
+    SaveState,
+    RestoreState,
     Pause(bool),
     SoundPulse1(bool),
     SoundPulse2(bool),
@@ -482,6 +486,12 @@ impl App {
                     let _ = self.sender_to_emulator.send(ToEmulatorMessage::Reboot(rom_info));
                 }
             }
+            SaveState => {
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::SaveState);
+            }
+            RestoreState => {
+                let _ = self.sender_to_emulator.send(ToEmulatorMessage::RestoreState);
+            }
             TogglePause => {
                 self.is_paused = !self.is_paused;
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::Pause(self.is_paused));
@@ -510,7 +520,7 @@ impl App {
                 self.debug_active = !self.debug_active;
                 unsafe { DEBUG_BUTTON = self.debug_active; }
             }
-            Debug => {
+            _Debug => {
                 crate::iced::cycle_minifb_upscale_algorithm();
                 let _ = self.sender_to_emulator.send(ToEmulatorMessage::Debug);
             }
@@ -772,6 +782,8 @@ impl App {
                     Color::from_rgb(0.35, 0.35, 0.35)
                 }),
             ))
+            .push(m_button("Save", AppMessage::SaveState, Some(Color::from_rgb(0.2, 0.4, 0.8))))
+            .push(m_button("Restore", AppMessage::RestoreState, Some(Color::from_rgb(0.2, 0.4, 0.8))))
          )
             .style(|_theme| {
                 container::Style {
@@ -998,9 +1010,6 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
                 }
             }
 
-
-
-
             // Apply persisted channel toggles for each fresh emulator instance (including reboots).
             if let Ok(cfg) = EmulatorConfig::read_or_create() {
                 let mut apu = emulator.apu.write().unwrap();
@@ -1023,6 +1032,12 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
                             reboot = true;
                             paused = false;
                             rom_info = ri;
+                        }
+                        ToEmulatorMessage::SaveState => {
+                            info!("Save state requested");
+                        }
+                        ToEmulatorMessage::RestoreState => {
+                            info!("Restore state requested");
                         }
                         ToEmulatorMessage::Pause(value) => {
                             if paused != value {

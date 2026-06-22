@@ -1,4 +1,4 @@
-use crate::constants::{CPU_TYPE_NEW};
+﻿use crate::constants::{CPU_TYPE_NEW};
 use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_config::MapperConfig;
 use crate::nes_memory::NesMemory;
@@ -8,7 +8,7 @@ use tracing::{debug};
 /// MMC1, mapper 1
 pub struct MapperMMC1 {
     prg_rom: Vec<u8>,
-    prg_rom_bank_count: u8,
+    prg_rom_bank_count: usize,
     chr_rom: Vec<u8>,
 
     shift_reg: u8,
@@ -25,12 +25,12 @@ impl MapperMMC1 {
     pub fn new(rom: &Rom, config: &mut MapperConfig) -> Self {
         config.set_is_custom_prg(true);
         config.set_is_custom_chr(true);
-        let prg_rom_bank_count = (rom.prg_rom.len() / PRG_ROM_SIZE) as u8;
+        let prg_rom_bank_count = rom.prg_rom.len() / PRG_ROM_SIZE;
         Self {
             prg_rom: rom.prg_rom.clone(),
             prg_rom_bank_count,
             chr_rom: rom.chr_rom.clone(),
-            shift_reg: 0,
+            shift_reg: 0x10,
             shift_count: 0,
             control: 0xc,
             chr_bank0: 0,
@@ -42,14 +42,60 @@ impl MapperMMC1 {
 }
 
 impl MapperMMC1 {
+    /// Reset triggered by a write with bit 7 set.
+    /// NESdev: clear shift register and force PRG mode bits high (|= 0x0C).
     fn reset(&mut self) {
-        self.shift_reg = 0x10; // (10000b)
+        self.shift_reg = 0x10;
         self.shift_count = 0;
-        self.control |= 0x0C; // force 16 KB mode as default
+        self.control |= 0x0C;
+    }
+
+    /// Clear the 5-bit shift register after latching a value.
+    fn clear_shift(&mut self) {
+        self.shift_reg = 0x10;
+        self.shift_count = 0;
     }
 }
 
 impl Mapper for MapperMMC1 {
+    fn read_prg(&self, address: u16) -> u8 {
+        let prg_mode = (self.control >> 2) & 0b11;
+        let bank_count = self.prg_rom_bank_count.max(1);
+        let selected_bank = (self.prg_bank & 0x0F) as usize;
+
+        let bank = match prg_mode {
+            0 | 1 => {
+                // 32 KB mode: ignore low bit, map even bank at $8000 and odd at $C000.
+                let bank_lo = (selected_bank & !1) % bank_count;
+                if address < 0xC000 {
+                    bank_lo
+                } else {
+                    (bank_lo + 1) % bank_count
+                }
+            }
+            2 => {
+                // Fix first bank at $8000, switch bank at $C000.
+                if address < 0xC000 {
+                    0
+                } else {
+                    selected_bank % bank_count
+                }
+            }
+            3 => {
+                // Switch bank at $8000, fix last bank at $C000.
+                if address < 0xC000 {
+                    selected_bank % bank_count
+                } else {
+                    bank_count - 1
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        let actual_address = (bank * PRG_ROM_SIZE) + ((address & 0x3fff) as usize);
+        self.prg_rom[actual_address]
+    }
+
     fn write_prg(&mut self, address: u16, value: u8, config: &mut MapperConfig) {
         if address < 0x8000 { return; }
         if ! CPU_TYPE_NEW {
@@ -123,7 +169,7 @@ impl Mapper for MapperMMC1 {
                     };
 
                     let prg_mode = (self.shift_reg >> 2) & 0b11;
-                    let chr_mode = (self.shift_reg >> 4) & 0b11;
+                    let chr_mode = (self.shift_reg >> 4) & 0b1;
                     debug!(target: "mapper", "M1:  write_prg() New control: ${:02X} nametable:{} \
                     prg_mode:{} chr_mode:{}",
                         self.shift_reg, self.nametable_arrangement, prg_mode, chr_mode);
@@ -143,43 +189,17 @@ impl Mapper for MapperMMC1 {
                 _ => {}
             }
 
-            self.reset();
+            self.clear_shift();
         }
-    }
-
-    fn write_chr(&mut self, address: u16, value: u8) {
-        let a = self.chr_index(address);
-        self.chr_rom[a] = value;
     }
 
     fn read_chr(&mut self, address: u16) -> u8 {
         self.chr_rom[self.chr_index(address)]
     }
 
-    fn read_prg(&self, address: u16) -> u8 {
-        let control = (self.control >> 2) & 0b11;
-        let mut bank = match control {
-            0 | 1 => (self.prg_bank & 7) as usize,       // 32 KB mode
-            2 => if address < 0xc000 { self.prg_bank as usize } else { 0 }, // switch at $8000
-            3 => if address < 0xC000 {
-                (self.prg_bank & 0xf) as usize
-                } else {
-                    self.prg_rom_bank_count as usize - 1
-                },
-            _ => { panic!("Should never happen");}
-        };
-
-        bank = bank & (self.prg_rom_bank_count as usize - 1);
-        let actual_address = (bank * PRG_ROM_SIZE) + (address & 0x3fff) as usize;
-
-        // if actual_address >= self.prg_rom.len() {
-        //     debug!(target: "mapper", "M1: read_prg() {address:04X} control:{} prg_bank:{} bank:{}",
-        //         self.control, self.prg_bank, bank);
-        //     println!();
-        // }
-
-        let result = self.prg_rom[actual_address];
-        result
+    fn write_chr(&mut self, address: u16, value: u8) {
+        let a = self.chr_index(address);
+        self.chr_rom[a] = value;
     }
 }
 
@@ -187,27 +207,101 @@ impl MapperMMC1 {
     fn chr_index(&self, address: u16) -> usize {
         let addr = NesMemory::ppu_mirrorring(address);
         let bank_mode = (self.control >> 4) & 1; // 0 = 8KB, 1 = 4KB
+        let chr_4k_bank_count = (self.chr_rom.len() / 0x1000).max(1);
 
         if bank_mode == 0 {
             // 8 KB mode
-            // Only CHR bank 0 is used, and it selects an 8 KB bank
-            let bank = (self.chr_bank0 as usize) & 0x1E; // mask to even, since it's 8 KB
+            // Only CHR bank 0 is used and bit 0 is ignored.
+            let bank = ((self.chr_bank0 as usize) & !1) % chr_4k_bank_count;
             let offset = (addr as usize) & 0x1FFF;       // 0–8191
             (bank * 0x1000) + offset
         } else {
-            // if self.chr_bank0 != 0 || self.chr_bank1 != 0 {
-            //     println!("BANK is $1C");
-            // }
             let bank = if addr < 0x1000 {
                 // 4 KB mode
                 // PPU $0000–0FFF → CHR bank 0
-                self.chr_bank0 as usize * 0x1000
+                (self.chr_bank0 as usize % chr_4k_bank_count) * 0x1000
             } else {
                 // PPU $1000–1FFF → CHR bank 1
-                self.chr_bank1 as usize * 0x1000
+                (self.chr_bank1 as usize % chr_4k_bank_count) * 0x1000
             };
             let offset = (addr as usize) & 0x0FFF;
             bank + offset
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_mapper(prg_16k_banks: usize) -> MapperMMC1 {
+        let mut rom = Rom::default();
+        rom.prg_rom = vec![0; PRG_ROM_SIZE * prg_16k_banks];
+        for bank in 0..prg_16k_banks {
+            let marker = 0xA0 + bank as u8;
+            let start = bank * PRG_ROM_SIZE;
+            for i in start..start + PRG_ROM_SIZE {
+                rom.prg_rom[i] = marker;
+            }
+        }
+        let mut config = MapperConfig::new(&rom);
+        MapperMMC1::new(&rom, &mut config)
+    }
+
+    #[test]
+    fn mmc1_mode2_maps_fixed_lower_and_switchable_upper() {
+        let mut mapper = make_test_mapper(4);
+        mapper.control = 0b01000;
+        mapper.prg_bank = 2;
+
+        assert_eq!(mapper.read_prg(0x8000), 0xA0);
+        assert_eq!(mapper.read_prg(0xC000), 0xA2);
+    }
+
+    #[test]
+    fn mmc1_mode3_maps_switchable_lower_and_fixed_last_upper() {
+        let mut mapper = make_test_mapper(4);
+        mapper.control = 0b01100;
+        mapper.prg_bank = 1;
+
+        assert_eq!(mapper.read_prg(0x8000), 0xA1);
+        assert_eq!(mapper.read_prg(0xC000), 0xA3);
+    }
+
+    #[test]
+    fn mmc1_mode0_uses_two_consecutive_16k_banks() {
+        let mut mapper = make_test_mapper(4);
+        mapper.control = 0b00000;
+        mapper.prg_bank = 3; // low bit ignored => banks 2 and 3
+
+        assert_eq!(mapper.read_prg(0x8000), 0xA2);
+        assert_eq!(mapper.read_prg(0xC000), 0xA3);
+    }
+
+    #[test]
+    fn mmc1_successful_latch_does_not_force_mode3() {
+        let mut mapper = make_test_mapper(4);
+        let mut config = MapperConfig::new(&Rom::default());
+
+        for &bit in &[0u8, 0, 0, 1, 0] {
+            mapper.write_prg(0x8000, bit, &mut config);
+        }
+        assert_eq!((mapper.control >> 2) & 0b11, 2);
+
+        for _ in 0..5 {
+            mapper.write_prg(0xE000, 0, &mut config);
+        }
+        assert_eq!((mapper.control >> 2) & 0b11, 2);
+    }
+
+    #[test]
+    fn mmc1_reset_write_forces_prg_mode_to_3() {
+        let mut mapper = make_test_mapper(2);
+        mapper.control = 0;
+        let mut config = MapperConfig::new(&Rom::default());
+        mapper.write_prg(0x8000, 0x80, &mut config);
+        assert_eq!((mapper.control >> 2) & 0b11, 3);
+        assert_eq!(mapper.shift_reg, 0x10);
+        assert_eq!(mapper.shift_count, 0);
     }
 }

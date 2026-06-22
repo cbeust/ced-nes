@@ -70,6 +70,7 @@ fn test_ppu2_scroll_events_do_not_advance_v_when_rendering_disabled() {
 fn test_ppu2_scroll_events_advance_v_when_rendering_enabled() {
     let mut ppu = Ppu2::new(&mut MapperBase::new(&Rom::default()));
     let mut memory = NesMemory::new_for_testing();
+    memory.ppu_mask = crate::ppu_mask::PpuMask::new(0x18);
 
     // Coarse X = 31; first INC_HORIZ_V should wrap coarse X to 0 and toggle horizontal NT.
     memory.ir.v = 0x001F;
@@ -88,6 +89,7 @@ fn test_ppu2_scroll_events_advance_v_when_rendering_enabled() {
 fn test_ppu2_scroll_events_increment_coarse_x_without_wrap() {
     let mut ppu = Ppu2::new(&mut MapperBase::new(&Rom::default()));
     let mut memory = NesMemory::new_for_testing();
+    memory.ppu_mask = crate::ppu_mask::PpuMask::new(0x18);
 
     memory.ir.v = 0x001E;
 
@@ -144,6 +146,7 @@ fn test_ppu2_pattern_shift_registers_do_not_advance_when_rendering_disabled() {
 fn test_ppu2_pattern_shift_registers_advance_on_visible_dot_when_bg_enabled() {
     let mut ppu = Ppu2::new(&mut MapperBase::new(&Rom::default()));
     let mut memory = NesMemory::new_for_testing();
+    memory.ppu_mask = crate::ppu_mask::PpuMask::new(0x08);
 
     ppu.pattern_shift_low = 0x4001;
     ppu.pattern_shift_high = 0x8000;
@@ -398,15 +401,35 @@ fn test_ppu2_all_8_sprites_fetched_per_scanline() {
 fn test_ppu2_frame_wrap_starts_at_dot_zero() {
     let mut ppu = Ppu2::new(&mut MapperBase::new(&Rom::default()));
     let mut memory = NesMemory::new_for_testing();
+    memory.ppu_mask = crate::ppu_mask::PpuMask::new(0x18);
 
     // Position at the final dot of the frame.
     ppu.event_index = HEIGHT * WIDTH - 1;
 
-    // Advance one tick with rendering enabled. Frame wrap must land at dot 0,
-    // otherwise scanline-0 prefetch/bootstrap is skipped and top-row artifacts appear.
+    // With rendering enabled, odd frames skip dot 0 at frame start.
     ppu.tick(true, true, &mut memory);
 
-    assert_eq!(ppu.event_index, 0);
+    assert_eq!(ppu.event_index, 1);
     assert_eq!(ppu.scanline, 0);
-    assert_eq!(ppu.x, 0);
+    assert_eq!(ppu.x, 1);
+}
+
+#[test]
+fn test_ppu2_frame_wrap_odd_skip_resets_sprite_state() {
+    let mut ppu = Ppu2::new(&mut MapperBase::new(&Rom::default()));
+    let mut memory = NesMemory::new_for_testing();
+    memory.ppu_mask = crate::ppu_mask::PpuMask::new(0x18);
+
+    // Seed non-zero state to ensure frame wrap clears it even if dot 0 is skipped.
+    ppu.oam2_eval_index = 12;
+    ppu.oam2_clear_index = 7;
+    ppu.sprite_fetch_index = 3;
+    ppu.event_index = HEIGHT * WIDTH - 1;
+
+    ppu.tick(true, true, &mut memory);
+
+    assert_eq!(ppu.event_index, 1);
+    assert_eq!(ppu.oam2_eval_index, 0);
+    assert_eq!(ppu.oam2_clear_index, 0);
+    assert_eq!(ppu.sprite_fetch_index, 0);
 }

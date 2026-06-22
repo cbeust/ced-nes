@@ -12,7 +12,6 @@ log_to_file = []
 log_disk = []
 log_prodos = []
 minifb = []
-ppu1 = []
 
 [dev-dependencies]
 
@@ -50,3 +49,9 @@ gilrs = "0.11.1"
 zip = "8.6.0"
 base64 = "0.22.1"
 md5 = "0.8.0"
+vizia = {
+    git = "https://github.com/vizia/vizia",
+    rev = "cdfcedd5656c3eae99c6d27ecf8ae899de3f21e2",
+    version = "0.4.0",
+    features = ["winit"]
+}

@@ -2,7 +2,6 @@ mod rom;
 mod iced;
 mod color;
 pub mod nes_memory;
-mod ppu;
 mod emulator;
 mod joypad;
 mod app;
@@ -27,15 +26,17 @@ mod ppu2;
 mod delayed;
 mod fm2;
 mod bk2;
+mod vizia;
 
 use crate::config_file::EmulatorConfig;
-use crate::constants::{RomInfo, ALL_MAPPERS, CPU_TYPE_NEW, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM, TRACE_FILE_NAME, USE_ICED};
-use crate::iced::main_iced;
+use crate::constants::{Library, RomInfo, ALL_MAPPERS, CPU_TYPE_NEW, LIBRARY, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM, TRACE_FILE_NAME };
 use crate::logging::init_logging;
-use crate::minifb::main_minifb;
 use crate::rom_list::find_roms_with_mappers;
 use clap::Parser;
 use tracing::debug;
+use crate::iced::main_iced;
+use crate::minifb::main_minifb;
+use crate::vizia::{create_vizia_app};
 
 #[derive(Default, Debug, Parser)]
 #[command(author, version, about, long_about = None)]
@@ -90,9 +91,6 @@ impl Clone for Args {
 
 // #[tokio::main]
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // apu.rs::play();
-    // exit(0);
-
     let filename = if CPU_TYPE_NEW { "trace-new-cpu.txt" } else { TRACE_FILE_NAME };
     let _guard = init_logging(
         if LOG_TO_FILE { Some(filename.into() ) } else { None },
@@ -101,7 +99,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     debug!("Trying to open config file: {}", EmulatorConfig::config_file_name());
 
-    let mut config = EmulatorConfig::read_or_create().unwrap();
+    let mut config = EmulatorConfig::read_or_create()?;
 
     // Parse command-line arguments
     let mut args = Args::parse();
@@ -156,10 +154,13 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    if USE_ICED {
-        main_iced(args, roms.clone(), rom_info, config.clone());
-    } else {
-        main_minifb(args);
+    match LIBRARY {
+        Library::Iced => { main_iced(args, roms.clone(), rom_info, config.clone()); }
+        Library::Vizia => {
+            // _main2();
+            create_vizia_app(args, roms.clone(), rom_info, config.clone());
+        }
+        Library::MiniFb => { main_minifb(args); }
     }
 
     Ok(())
