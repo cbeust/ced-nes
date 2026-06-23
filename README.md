@@ -37,6 +37,50 @@
 cargo run -r -- -r <rom>.nes
 ```
 
+# CPU implementation
+
+[`cpu2.rs`](nes/src/cpu2.rs) implements a cycle-accurate 6502 CPU emulator. Unlike many high-level emulators that
+execute a full instruction in a single step, `cpu2.rs` is memory-cycled. This means the CPU's state machine progresses one
+clock cycle at a time, and every single cycle performs exactly one memory operation—either a read or a write.
+
+## Core Design: Memory-Cycled Execution
+
+The fundamental unit of execution in `cpu2.rs` is the `tick()` method. Each call to `tick()` represents one clock cycle
+of the 6502.
+
+- Single Memory Access per Cycle: In alignment with the real 6502 hardware, every cycle is characterized by a memory
+access. Even cycles that appear to be "internal" to the CPU on paper actually perform a read (often a redundant read of
+the next opcode or a stack byte) which is discarded.
+- The CPU maintains its internal state (registers, current opcode, current cycle within that opcode)
+across `tick()` calls. This allows it to be perfectly synchronized with other hardware components like the PPU or APU.
+- An instruction is considered finished when the `finished` flag is set during a `tick()`. The next
+call to `tick()` will then fetch the next opcode.
+
+## Key Components
+- `Cpu2<T>`: Holds the CPU registers (`A`, `X`, `Y`, `S`, `PC`, `P`) and the execution state (`current_opcode`, `current_cycle`,
+`finished`).
+- `tick(&mut self, config: &Config) -> u8`: The primary entry point for advancing the CPU by one clock cycle. It uses a
+large match statement on the `current_opcode` and a nested match on `current_cycle` to determine the specific action for the
+current cycle.
+- `run_one_instruction(&mut self, config: &Config) -> u8`: A helper method that calls `tick()` repeatedly until the current
+instruction is fully executed, returning the total number of cycles consumed.
+
+## Validation: Single Step Tests
+
+The accuracy of the cycle-by-cycle implementation is verified using the 6502 Single Step tests (commonly referred to as
+the "Harte" tests in this codebase).
+
+- Verification Scope: These tests ensure that for every opcode, the CPU performs the exact sequence of reads and writes to
+the correct addresses with the correct values, cycle by cycle.
+- Status: `cpu2.rs` successfully passes these comprehensive Single Step tests, confirming its behavior matches real 6502
+hardware at the bus level.
+
+## Usage in System
+
+In the larger emulator context, `cpu2.rs` is used when high precision and bus-level accuracy are required. It can be
+stepped cycle-by-cycle alongside the APU and PPU to ensure perfect timing synchronization, which is critical for many
+NES games that rely on precise mid-scanline timing or specific APU behavior.
+
 # PPU implementation
 
 [`ppu2.rs`](nes/src/ppu2.rs) implements the NES Picture Processing Unit (PPU) by simulating its internal logic as closely as possible to the official hardware diagrams (such as the one found on [NesDev](https://www.nesdev.org/w/images/default/4/4f/Ppu.svg)). Unlike high-level renderers that work scanline-by-scanline, `ppu2.rs` operates at the "dot" (pixel clock) level.
