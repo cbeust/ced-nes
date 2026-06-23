@@ -1,4 +1,3 @@
-use crate::app::{launch_emulator, ToEmulatorMessage, ToUiMessage};
 use crate::constants::*;
 use crate::joypad::Button;
 use crate::Args;
@@ -6,6 +5,7 @@ use fast_image_resize as fr;
 use fast_image_resize::images::Image;
 use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
+use crate::emulator::{launch_emulator, ToEmulatorMessage, ToUiMessage};
 
 pub fn main_minifb(args: Args) {
     // Create a new Tokio runtime to execute the async code

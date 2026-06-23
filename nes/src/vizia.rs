@@ -1,11 +1,10 @@
-use crate::app::{launch_emulator, ToEmulatorMessage, ToUiMessage};
 use crate::color::PALETTE_TUPLES;
 use crate::config_file::EmulatorConfig;
 use crate::constants::{RomInfo, HEIGHT, SCALE_X, SCALE_Y, WIDTH, WINDOW_TITLE};
-use crate::emulator::FRAME;
+use crate::emulator::{launch_emulator, ToEmulatorMessage, ToUiMessage, FRAME};
 use crate::joypad::{Button as JoyButton, Joypad};
 use crate::Args;
-use rand::Rng;
+use rand::distr::{Distribution, Uniform};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -24,9 +23,7 @@ pub const NES_HEIGHT: f32 = HEIGHT as f32;
 pub const SOUND_WAVEFORM_WIDTH: f32 = 300.0;
 pub const SOUND_WAVEFORM_HEIGHT: f32 = 110.0;
 
-const PANEL_BACKGROUND: Color = Color::rgb(64, 89, 115);
 const VGAP: Units = Pixels(16.0);
-const GAP_BETWEEN_TITLE_AND_VIEWS: Units = Pixels(40.0);
 
 /// App model to hold application state.
 pub struct AppModel {
@@ -46,13 +43,6 @@ pub struct AppModel {
 }
 
 impl AppModel {
-    #[allow(dead_code)]
-    fn default() -> Self {
-        let (sender, _receiver) = channel(10);
-        Self::new(vec![], Signal::new(Arc::new(RwLock::new((0.0, 0, "".to_string())))), 0.0, 0.0,
-            sender)
-    }
-
     fn new(roms: Vec<RomInfo>, title_state: Signal<Arc<RwLock<(f32, u16, String)>>>,
            canvas_width: f32, canvas_height: f32, sender_to_emulator: Sender<ToEmulatorMessage>)
     -> Self {
@@ -89,25 +79,6 @@ fn key_code_to_button(code: Code) -> Option<JoyButton> {
         Code::KeyB => Some(JoyButton::B),
         _ => None,
     }
-}
-
-fn persist_sound_config(
-    config: &Arc<RwLock<EmulatorConfig>>,
-    sound_config: &SoundConfig,
-) {
-    if let Ok(mut cfg) = config.write() {
-        cfg.sound_all_enabled = sound_config.all_enabled.get();
-        cfg.sound_triangle_enabled = sound_config.triangle_enabled.get();
-        cfg.sound_pulse1_enabled = sound_config.pulse1_enabled.get();
-        cfg.sound_pulse2_enabled = sound_config.pulse2_enabled.get();
-        cfg.sound_noise_enabled = sound_config.noise_enabled.get();
-        cfg.sound_dmc_enabled = sound_config.dmc_enabled.get();
-        let _ = cfg.save();
-    }
-}
-
-fn build_window_title(frequency: f32, fps: u16, rom_name: &str) -> String {
-    format!("{WINDOW_TITLE} - {frequency:.02} Mhz - {fps} FPS - {rom_name}")
 }
 
 /// A custom Vizia view that paints the current NES frame.
@@ -372,20 +343,15 @@ pub fn create_vizia_app(args: Args, roms: Vec<RomInfo>, rom_info: RomInfo, confi
         let timer = cx.add_timer(Duration::from_millis(16), None, move |cx, action| {
             if matches!(action, TimerAction::Start | TimerAction::Tick(_)) {
                 if let Ok(title) = title_state3.read() {
-                    cx.emit(WindowEvent::SetTitle(build_window_title(title.0, title.1, &title.2)));
+                    let title = format!("{WINDOW_TITLE} - {:.02} Mhz - {} FPS - {}",
+                        title.0, title.1, &title.2);
+                    cx.emit(WindowEvent::SetTitle(title));
                 }
                 cx.needs_redraw();
             }
         });
         cx.start_timer(timer);
-        let ui = build_ui(cx, config,
-                          joypad, waveform_samples);
-
-        ui
-            .width(Stretch(1.0))
-            .height(Stretch(1.0))
-            .gap(Pixels(24.0))
-        .padding(Pixels(10.0));
+        build_ui(cx, config, joypad, waveform_samples);
     })
     .title(WINDOW_TITLE)
     .inner_size((window_width, window_height))
@@ -397,29 +363,14 @@ fn build_sound_checkbox_all(cx: &'_ mut Context, emulator_config: Arc<RwLock<Emu
 {
     HStack::new(cx, |cx| {
         let all_enabled = sound_config.all_enabled.clone();
-        let triangle_enabled = sound_config.triangle_enabled.clone();
-        let pulse1_enabled = sound_config.pulse1_enabled.clone();
-        let pulse2_enabled = sound_config.pulse2_enabled.clone();
-        let noise_enabled = sound_config.noise_enabled.clone();
-        let dmc_enabled = sound_config.dmc_enabled.clone();
-
         let sound_config = sound_config.clone();
-        let sender = cx.data::<AppModel>().sender_to_emulator.clone();
         let cfg = emulator_config.clone();
+        let sender = cx.data::<AppModel>().sender_to_emulator.clone();
         checkbox(cx, "Sound".to_string(), all_enabled, move |_| {
             let enabled = !all_enabled.get();
             all_enabled.set(enabled);
-            triangle_enabled.set(enabled);
-            pulse1_enabled.set(enabled);
-            pulse2_enabled.set(enabled);
-            noise_enabled.set(enabled);
-            dmc_enabled.set(enabled);
-            let _ = sender.send(ToEmulatorMessage::SoundTriangle(enabled));
-            let _ = sender.send(ToEmulatorMessage::SoundPulse1(enabled));
-            let _ = sender.send(ToEmulatorMessage::SoundPulse2(enabled));
-            let _ = sender.send(ToEmulatorMessage::SoundNoise(enabled));
-            let _ = sender.send(ToEmulatorMessage::SoundDmc(enabled));
-            persist_sound_config(&cfg, &sound_config);
+            let _ = sender.send(ToEmulatorMessage::SoundAll(enabled));
+            sound_config.persist(&cfg);
         });
     })
     .class("nes-checkbox")
@@ -430,7 +381,8 @@ fn build_sound_checkbox_all(cx: &'_ mut Context, emulator_config: Arc<RwLock<Emu
 
 fn build_sound_checkbox(cx: &mut Context, emulator_config: &Arc<RwLock<EmulatorConfig>>,
     sound_config: &mut SoundConfig,
-    is_enabled: Signal<bool>, name: String)
+    is_enabled: Signal<bool>, name: String,
+    channel: impl Fn(bool) -> ToEmulatorMessage + 'static)
 {
     let sender = cx.data::<AppModel>().sender_to_emulator.clone();
     let cfg = emulator_config.clone();
@@ -438,15 +390,8 @@ fn build_sound_checkbox(cx: &mut Context, emulator_config: &Arc<RwLock<EmulatorC
     checkbox(cx, name, is_enabled, move |_| {
         let enabled = !is_enabled.get();
         is_enabled.set(enabled);
-        sound_config.all_enabled.set(
-            sound_config.triangle_enabled.get()
-                && sound_config.pulse1_enabled.get()
-                && sound_config.pulse2_enabled.get()
-                && sound_config.noise_enabled.get()
-                && sound_config.dmc_enabled.get(),
-        );
-        let _ = sender.send(ToEmulatorMessage::SoundTriangle(enabled));
-        persist_sound_config(&cfg, &sound_config);
+        let _ = sender.send(channel(enabled));
+        sound_config.persist(&cfg);
     });
 }
 
@@ -461,6 +406,18 @@ struct SoundConfig {
 }
 
 impl SoundConfig {
+    fn persist(&self, config: &Arc<RwLock<EmulatorConfig>>) {
+        if let Ok(mut cfg) = config.write() {
+            cfg.sound_all_enabled = self.all_enabled.get();
+            cfg.sound_triangle_enabled = self.triangle_enabled.get();
+            cfg.sound_pulse1_enabled = self.pulse1_enabled.get();
+            cfg.sound_pulse2_enabled = self.pulse2_enabled.get();
+            cfg.sound_noise_enabled = self.noise_enabled.get();
+            cfg.sound_dmc_enabled = self.dmc_enabled.get();
+            let _ = cfg.save();
+        }
+    }
+
 }
 
 fn build_panel_sound(cx: &mut Context,config: EmulatorConfig,
@@ -488,14 +445,14 @@ fn build_panel_sound(cx: &mut Context,config: EmulatorConfig,
                     VStack::new(cx, |cx| {
                         build_sound_checkbox(cx, &emulator_config,
                             &mut sound_config.clone(), sound_config.triangle_enabled,
-                            "Triangle".into());
+                            "Triangle".into(), ToEmulatorMessage::SoundTriangle);
                         build_sound_checkbox(cx, &emulator_config,
                             &mut sound_config.clone(), sound_config.pulse1_enabled,
-                            "Pulse 1".into());
+                            "Pulse 1".into(), ToEmulatorMessage::SoundPulse1);
                         build_sound_checkbox(cx, &emulator_config,
                             &mut sound_config.clone(),
                             sound_config.dmc_enabled,
-                            "DMC".into());
+                            "DMC".into(), ToEmulatorMessage::SoundDmc);
                     })
                     .vertical_gap(VGAP)
                     .width(Percentage(50.0));
@@ -504,11 +461,11 @@ fn build_panel_sound(cx: &mut Context,config: EmulatorConfig,
                         build_sound_checkbox(cx, &emulator_config,
                             &mut sound_config.clone(),
                             sound_config.noise_enabled,
-                            "Noise".into());
+                            "Noise".into(), ToEmulatorMessage::SoundNoise);
                         build_sound_checkbox(cx, &emulator_config,
                             &mut sound_config.clone(),
                             sound_config.pulse2_enabled,
-                            "Pulse 2".into());
+                            "Pulse 2".into(), ToEmulatorMessage::SoundPulse2);
                     })
                     .vertical_gap(VGAP)
                     .width(Percentage(50.0));
@@ -522,10 +479,6 @@ fn build_panel_sound(cx: &mut Context,config: EmulatorConfig,
                 .height(Pixels(SOUND_WAVEFORM_HEIGHT));
         })
         .title_position(FrameTitlePosition::TopCenter)
-        .background_color(PANEL_BACKGROUND)
-        .padding_top(Pixels(30.0))
-        .gap(Pixels(20.0))
-        .width(Stretch(1.0))
         .class("sound-panel")
         ;
     })
@@ -534,9 +487,7 @@ fn build_panel_sound(cx: &mut Context,config: EmulatorConfig,
 
 /// Main entry point that builds the whole GUI
 fn build_ui(cx: &mut Context, config: EmulatorConfig, joypad: Arc<RwLock<Joypad>>,
-        waveform_samples: Arc<RwLock<Vec<f32>>>)
--> Handle<'_, HStack>
-{
+        waveform_samples: Arc<RwLock<Vec<f32>>>) {
     HStack::new(cx, |cx| {
         build_panel_emulator_canvas(cx, joypad);
         build_panel_rom(cx);
@@ -547,10 +498,7 @@ fn build_ui(cx: &mut Context, config: EmulatorConfig, joypad: Arc<RwLock<Joypad>
         .gap(Pixels(24.0))
         ;
     })
-    .height(Stretch(1.0))
-    .gap(Pixels(24.0))
-    .background_color(Color::rgb(80, 80, 80))
-    .padding(Pixels(10.0))
+    .class("main-panel");
 }
 
 fn build_panel_rom(cx: &mut Context) {
@@ -682,7 +630,7 @@ fn boot_rom(cx: &EventContext) {
 fn boot_random_rom(cx: &mut EventContext) {
     let len = cx.data::<AppModel>().roms.len();
     let index = if len > 0 {
-        let index = rand::thread_rng().gen_range(0..len);
+        let index = Uniform::new(0, len).unwrap().sample(&mut rand::rng());
         println!("Random index:{index} len:{len}");
         Some(index)
     } else {
@@ -748,21 +696,15 @@ fn build_panel_controls(cx: &mut Context) {
             ;
         })
         .class("controls-panel")
-        .background_color(PANEL_BACKGROUND)
-        // .border_width(Pixels(1.0))
-        // .border_color(Color::white())
-        .space(Pixels(50.0))
         .title_position(FrameTitlePosition::TopCenter)
-        .width(Stretch(1.0))
     ;
 }
 
 fn build_panel_emulator_canvas(cx: &mut Context, joypad: Arc<RwLock<Joypad>>) {
-    println!("Canvas width: {}, height: {}", cx.data::<AppModel>().canvas_width, cx.data::<AppModel>().canvas_height);
-    let show_grid = cx.data::<AppModel>().show_grid;
-    let grid_hover_text = cx.data::<AppModel>().grid_hover_text;
-    let width = cx.data::<AppModel>().canvas_width;
-    let height = cx.data::<AppModel>().canvas_height;
+    let (show_grid, grid_hover_text, width, height) = {
+        let am = cx.data::<AppModel>();
+        (am.show_grid, am.grid_hover_text, am.canvas_width, am.canvas_height)
+    };
     EmulatorCanvas::new(cx, joypad.clone())
         .class("canvas")
         .width(Pixels(width))
@@ -798,8 +740,6 @@ fn build_panel_emulator_canvas(cx: &mut Context, joypad: Arc<RwLock<Joypad>>) {
             }
         });
 
-    let grid_hover_text = cx.data::<AppModel>().grid_hover_text;
-    let show_grid = cx.data::<AppModel>().show_grid;
     Binding::new(cx, grid_hover_text, move |cx| {
         let text = grid_hover_text.get();
         if !text.is_empty() && show_grid.get() {

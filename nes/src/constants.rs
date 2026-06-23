@@ -12,7 +12,7 @@ pub const DEBUG_MESEN: bool = false;
 pub const LOG_TO_FILE: bool = DEBUG;
 #[allow(dead_code)]
 pub enum Library {
-    Iced, Vizia, MiniFb,
+    Vizia, MiniFb,
 }
 pub const LIBRARY: Library = Library::Vizia;
 pub const SELECTED_ROM: usize = 400;
@@ -35,7 +35,6 @@ pub const SCALE_Y: f32 = 2.0;
 
 // pub const ALL_MAPPERS: [u8; 1] = [1];
 pub const ALL_MAPPERS: [u8; 9] = [0, 1, 2, 3, 4, 7, 9, 19, 66];
-pub const DEMO_DELAY_SECONDS: u64 = 8;
 
 use once_cell::sync::Lazy;
 use std::convert::Into;

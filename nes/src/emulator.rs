@@ -1,7 +1,6 @@
-use crate::app::SharedState;
 use crate::apu::Apu;
-use crate::constants::{RomInfo, CPU_TYPE_NEW, DEBUG_ASM, DEBUG_MESEN, HEIGHT, WIDTH};
-use crate::joypad::Joypad;
+use crate::constants::{RomInfo, CAP_FPS, CPU_TYPE_NEW, DEBUG_ASM, DEBUG_MESEN, HEIGHT, WIDTH, WINDOW_TITLE};
+use crate::joypad::{Button, Joypad};
 use crate::mappers::mapper_base::MapperBase;
 use crate::mesen_logger::{MesenLogger, LOG_CYCLE, LOG_SCANLINE};
 use crate::nes_memory::NesMemory;
@@ -18,8 +17,14 @@ use enum_dispatch::enum_dispatch;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
-use tracing::{debug, info};
+use std::thread;
+use std::time::{Duration, Instant};
+use gilrs::{Axis, Button as GilButton, EventType, Gilrs};
+use tokio::sync::broadcast::{Receiver, Sender};
+use tracing::{debug, info, warn};
+use crate::bk2::Bk2Movie;
+use crate::config_file::EmulatorConfig;
+use crate::fm2::Fm2Movie;
 use crate::ppu2::Ppu2;
 
 const TICK_BATCH_CYCLES: usize = 2_000;
@@ -445,4 +450,341 @@ impl Emulator {
         let _ = std::fs::write(file, line);
         info!("Wrote {file}");
     }
+}
+
+pub struct SharedState {
+    pub title: String,
+    pub _joypad1: String,
+    pub rom_name: String,
+    pub paused_cycle_count: u128,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self {
+            title: String::from(WINDOW_TITLE),
+            _joypad1: String::from("Joypad 1"),
+            rom_name: "".into(),
+            paused_cycle_count: 0,
+        }
+    }
+}
+
+pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
+                       sender: Sender<ToUiMessage>, mut receiver: Receiver<ToEmulatorMessage>) ->
+                       (Arc<RwLock<SharedState>>, Arc<RwLock<Joypad>>)
+{
+    let shared_state = Arc::new(RwLock::new(SharedState::default()));
+    let shared_state2 = shared_state.clone();
+    let fm2_movie = if let Some(fm2_file) = &args.fm2 {
+        let movie = Fm2Movie::parse_file(fm2_file).unwrap();
+        let rom = Rom::read_nes_file(&rom_info.file_name()).unwrap();
+        if let Some(false) = movie.rom_checksum_matches(&rom) {
+            warn!(
+                target: "fm2",
+                rom = %rom_info.file_name(),
+                rom_checksum = %rom.checksum,
+                movie_checksum = %movie.rom_checksum().unwrap_or_default(),
+                "FM2 movie ROM checksum does not match the loaded ROM"
+            );
+        }
+        Some(movie)
+    } else {
+        None
+    };
+
+    println!("Current directory: {}", std::env::current_dir().unwrap().display());
+    let mut bk2_movie = if let Some(bk2_file) = &args.bk2 {
+        let movie = Bk2Movie::parse_file(bk2_file).expect(&format!("File {bk2_file} should exist"));
+        Some(movie)
+    } else {
+        None
+    };
+
+    let joypad = Arc::new(RwLock::new(Joypad::new()));
+    let joypad2 = joypad.clone();
+    let _ = thread::Builder::new()
+        .name("NES emulator thread".to_string())
+        .spawn(move|| {
+            let mut reboot = false;
+            let mut paused = false;
+            let mut gilrs = Gilrs::new().ok();
+            // Keep the APU alive across reboots so we never recreate the audio device.
+            let mut carry_apu: Option<Arc<RwLock<crate::apu::Apu>>> = None;
+            loop {
+                let mut emulator = Emulator::new(rom_info.clone(),
+                                                 shared_state.clone(), joypad2.clone(), args.clone(), carry_apu.take());
+
+                if let (Some(movie), Some(rom)) = (fm2_movie.as_ref(), emulator._rom.as_ref()) {
+                    if let Some(false) = movie.rom_checksum_matches(rom) {
+                        warn!(
+                        target: "fm2",
+                        rom = %rom_info.file_name(),
+                        rom_checksum = %rom.checksum,
+                        movie_checksum = %movie.rom_checksum().unwrap_or_default(),
+                        "FM2 movie ROM checksum does not match the loaded ROM"
+                    );
+                    }
+                }
+
+                // Apply persisted channel toggles for each fresh emulator instance (including reboots).
+                if let Ok(cfg) = EmulatorConfig::read_or_create() {
+                    let mut apu = emulator.apu.write().unwrap();
+                    apu.set_sound_enabled(cfg.sound_all_enabled);
+                    apu.set_pulse1_enabled(cfg.sound_pulse1_enabled);
+                    apu.set_pulse2_enabled(cfg.sound_pulse2_enabled);
+                    apu.set_triangle_enabled(cfg.sound_triangle_enabled);
+                    apu.set_noise_enabled(cfg.sound_noise_enabled);
+                    apu.set_dmc_enabled(cfg.sound_dmc_enabled);
+                }
+
+                let mut one_second_start = Instant::now();
+                let mut sound_flush_start = Instant::now();
+                let mut one_second_cycles = 0;
+
+                while ! reboot {
+                    while let Ok(m) = receiver.try_recv() {
+                        match m {
+                            ToEmulatorMessage::Reboot(ri) => {
+                                info!("Emulator rebooting with {ri:#?})");
+                                reboot = true;
+                                paused = false;
+                                rom_info = ri;
+                            }
+                            ToEmulatorMessage::_SaveState => {
+                                info!("Save state requested");
+                            }
+                            ToEmulatorMessage::_RestoreState => {
+                                info!("Restore state requested");
+                            }
+                            ToEmulatorMessage::Pause(value) => {
+                                if paused != value {
+                                    paused = value;
+                                    one_second_cycles = 0;
+                                    one_second_start = Instant::now();
+                                    sound_flush_start = Instant::now();
+                                    emulator.frame_stats.clear();
+                                    emulator.frame_count.clear();
+                                    emulator.frame_count_last = Instant::now();
+
+                                    if let Ok(mut state) = shared_state.write() {
+                                        if paused {
+                                            state.paused_cycle_count = emulator.cpu.get_cycles();
+                                            state.title = format!(
+                                                "{} - Paused - Cycle {} - {}",
+                                                WINDOW_TITLE,
+                                                state.paused_cycle_count,
+                                                state.rom_name
+                                            );
+                                        } else {
+                                            state.title = format!("{} - {}", WINDOW_TITLE, state.rom_name);
+                                        }
+                                    }
+                                }
+                            }
+                            ToEmulatorMessage::_Debug => {
+                                emulator.debug();
+                            }
+                            ToEmulatorMessage::SoundAll(enabled) => {
+                                emulator.apu.write().unwrap().set_sound_enabled(enabled);
+                            }
+                            ToEmulatorMessage::SoundPulse1(enabled) => {
+                                emulator.apu.write().unwrap().set_pulse1_enabled(enabled);
+                            }
+                            ToEmulatorMessage::SoundPulse2(enabled) => {
+                                emulator.apu.write().unwrap().set_pulse2_enabled(enabled);
+                            }
+                            ToEmulatorMessage::SoundTriangle(enabled) => {
+                                emulator.apu.write().unwrap().set_triangle_enabled(enabled);
+                            }
+                            ToEmulatorMessage::SoundNoise(enabled) => {
+                                emulator.apu.write().unwrap().set_noise_enabled(enabled);
+                            }
+                            ToEmulatorMessage::SoundDmc(enabled) => {
+                                emulator.apu.write().unwrap().set_dmc_enabled(enabled);
+                            }
+                        }
+                    }
+
+                    if let Some(g) = gilrs.as_mut() {
+                        while let Some(event) = g.next_event() {
+                            match event.event {
+                                EventType::ButtonPressed(button, _) => {
+                                    if let Some(mapped) = map_gilrs_button(button) {
+                                        joypad2.write().unwrap().set_button_status(mapped, true);
+                                    }
+                                }
+                                EventType::ButtonReleased(button, _) => {
+                                    if let Some(mapped) = map_gilrs_button(button) {
+                                        joypad2.write().unwrap().set_button_status(mapped, false);
+                                    }
+                                }
+                                EventType::AxisChanged(Axis::LeftStickX, value, _) => {
+                                    let mut joypad = joypad2.write().unwrap();
+                                    apply_stick_x(&mut joypad, value);
+                                }
+                                EventType::AxisChanged(Axis::LeftStickY, value, _) => {
+                                    let mut joypad = joypad2.write().unwrap();
+                                    apply_stick_y(&mut joypad, value);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    if reboot {
+                        continue;
+                    }
+
+                    if paused {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+
+                    let (cycles, frame_completed) = emulator.tick();
+                    one_second_cycles += cycles;
+
+                    // fm2
+                    if let Some(movie) = &mut bk2_movie {
+                        if frame_completed {
+                            if let Some(frame) = movie.next_state() {
+                                // Apply full controller state every frame so releases are honored.
+                                // Using direct button mapping avoids stick helper deadzone/inversion logic.
+                                let mut joypad = joypad2.write().unwrap();
+                                joypad.set_button_status(Button::Up, frame.up);
+                                joypad.set_button_status(Button::Down, frame.down);
+                                joypad.set_button_status(Button::Left, frame.left);
+                                joypad.set_button_status(Button::Right, frame.right);
+                                joypad.set_button_status(Button::A, frame.a);
+                                joypad.set_button_status(Button::B, frame.b);
+                                joypad.set_button_status(Button::Start, frame.start);
+                                joypad.set_button_status(Button::Select, frame.select);
+
+                                if !frame.is_empty() {
+                                    info!("Event: {}", frame);
+                                }
+                            }
+                        }
+                    }
+
+                    let elapsed = one_second_start.elapsed().as_millis();
+                    let sound_elapsed = sound_flush_start.elapsed().as_millis();
+
+                    if sound_elapsed > 100 && !emulator.sound_samples.is_empty() {
+                        let samples = std::mem::take(&mut emulator.sound_samples);
+                        let _ = sender.send(ToUiMessage::SoundSamples(samples));
+                        sound_flush_start = Instant::now();
+                    }
+
+                    if elapsed > 1000 {
+                        // Refresh the frequency display every second
+                        let frames = emulator.frame_stats.len();
+                        let frequency = one_second_cycles as f32 / (elapsed as f32 * 1000.0);
+                        let _ = sender.send(ToUiMessage::Update(frequency, frames as u16));
+                        emulator.frame_stats.clear();
+                        one_second_cycles = 0;
+                        one_second_start = Instant::now();
+                    }
+
+                    if let Some(cap) = CAP_FPS {
+                        // If CAP_FPS is set to 60 and the divider is 10, we want
+                        // to run 6 (FPS / divider) frames every 100 (1000 / 10) milliseconds
+                        // The higher the divider, the smoother the scrolling, up to a point
+                        // (if the divider is too high, it makes the emulator uncapped)
+                        let divider = 30_u128;
+                        // Divider = 10, caps = 40 fps, need to run 4 frames every 100ms
+                        let time_wait_ms = 1000 / divider;
+                        let frame_cap_divided = cap as u128 / divider;
+                        let frame_count = emulator.frame_count.len();
+                        // let frame_count_divided = frame_count / divider as usize;
+                        // info!("Frame count:{frame_count} time_wait:{time_wait_ms}");
+                        if frame_count as u128 >= frame_cap_divided {
+                            let elapsed = emulator.frame_count_last.elapsed().as_millis();
+                            if elapsed >= time_wait_ms {
+                                emulator.frame_count.drain(0..frame_cap_divided as usize);
+                                emulator.frame_count_last = Instant::now();
+                            } else {
+                                let can_sleep_for_video_throttle = emulator.apu.read().unwrap()
+                                    .can_sleep_for_video_throttle();
+
+                                if can_sleep_for_video_throttle {
+                                    let remaining_ms = (time_wait_ms - elapsed) as u64;
+                                    if remaining_ms > 1 {
+                                        thread::sleep(Duration::from_millis(1));
+                                    } else {
+                                        thread::yield_now();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                }
+                // Save the APU Arc so the audio device survives the reboot.
+                carry_apu = Some(emulator.apu.clone());
+                reboot = false;
+            }
+        });
+
+    (shared_state2, joypad)
+}
+
+fn map_gilrs_button(button: GilButton) -> Option<Button> {
+    match button {
+        GilButton::South => Some(Button::A),
+        GilButton::East => Some(Button::B),
+        GilButton::Start => Some(Button::Start),
+        GilButton::Select => Some(Button::Select),
+        _ => None,
+    }
+}
+
+const STICK_DEADZONE: f32 = 0.25;
+
+fn apply_stick_x(joypad: &mut Joypad, value: f32) {
+    if value > STICK_DEADZONE {
+        joypad.set_button_status(Button::Right, true);
+        joypad.set_button_status(Button::Left, false);
+    } else if value < -STICK_DEADZONE {
+        joypad.set_button_status(Button::Left, true);
+        joypad.set_button_status(Button::Right, false);
+    } else {
+        joypad.set_button_status(Button::Left, false);
+        joypad.set_button_status(Button::Right, false);
+    }
+}
+
+fn apply_stick_y(joypad: &mut Joypad, value: f32) {
+    if value < -STICK_DEADZONE {
+        joypad.set_button_status(Button::Down, true);
+        joypad.set_button_status(Button::Up, false);
+    } else if value > STICK_DEADZONE {
+        joypad.set_button_status(Button::Up, true);
+        joypad.set_button_status(Button::Down, false);
+    } else {
+        joypad.set_button_status(Button::Up, false);
+        joypad.set_button_status(Button::Down, false);
+    }
+}
+
+#[derive(Clone)]
+pub enum ToUiMessage {
+    // Frequency, FPS
+    Update(f32, u16),
+    SoundSamples(Vec<f32>),
+}
+
+#[derive(Clone)]
+pub enum ToEmulatorMessage {
+    Reboot(RomInfo),
+    _SaveState,
+    _RestoreState,
+    Pause(bool),
+    SoundAll(bool),
+    SoundPulse1(bool),
+    SoundPulse2(bool),
+    SoundTriangle(bool),
+    SoundNoise(bool),
+    SoundDmc(bool),
+    _Debug,
 }

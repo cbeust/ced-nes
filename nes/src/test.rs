@@ -1,6 +1,5 @@
-use crate::app::SharedState;
 use crate::constants::{RomInfo, ROM_NAMES};
-use crate::emulator::{Emulator, CpuInterface};
+use crate::emulator::{Emulator, CpuInterface, SharedState};
 use crate::joypad::Joypad;
 use crate::nes_memory::{NesMemory, IR};
 use crate::ppu2::{Ppu2, PpuResult};

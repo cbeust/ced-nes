@@ -36,3 +36,48 @@
 cargo run -r -- -r <rom>.nes
 ```
 
+# PPU implementation
+
+The `ppu2.rs` file implements the NES Picture Processing Unit (PPU) by simulating its internal logic as closely as possible to the official hardware diagrams (such as the one found on [NesDev](https://www.nesdev.org/w/images/default/4/4f/Ppu.svg)). Unlike high-level renderers that work scanline-by-scanline, `ppu2.rs` operates at the "dot" (pixel clock) level.
+
+## 1. Event-Driven Architecture
+The core of the implementation is a large pre-calculated array of events:
+- **Event Array:** An array of `261 * 340` (the dimensions of a NTSC NES frame) elements is created during initialization via `init_events()`.
+- **Dot-by-Dot Execution:** Every time the PPU `tick()` function is called, it lookups the event(s) associated with the current dot (`x` and `scanline`).
+- **Bitmask Events:** Each entry in the array is a bitmask of actions to perform, such as:
+    - `NT` / `AT`: Fetch Name Table or Attribute Table byte.
+    - `BG_LSBITS` / `BG_MSBITS`: Fetch Pattern Table (tile) bits.
+    - `INC_HORIZ_V` / `INC_VERT_V`: Increment the internal scroll registers (`v` and `t`).
+    - `SPRITE_EVALUATION`: Check which sprites belong on the next scanline.
+
+## 2. Hardware-Accurate Shifters
+The PPU uses 16-bit shift registers to handle smooth scrolling and pixel output, which `ppu2.rs` replicates exactly:
+- **Pattern Shifters:** `pattern_shift_low` and `pattern_shift_high` hold the 2 bits of color data for the next 16 pixels.
+- **Attribute Shifters:** `attr_shift_low` and `attr_shift_high` hold the palette selection bits.
+- **Fine-X Scrolling:** The `fine_x` scroll value acts as a selector for which bit in the 16-bit shifters is currently being "emitted" as the pixel.
+- **Reloading:** Every 8 dots, the shifters are updated with new data fetched from VRAM. The implementation ensures that bits are shifted only when rendering is enabled and during specific windows (visible area and pre-fetch periods), preventing graphical glitches like the "left-edge black bar."
+
+## 3. Sprite Logic
+Sprite handling is split into two distinct phases, matching the hardware's 341-dot cycle:
+- **Evaluation (Dots 65–256):** The PPU scans the 256-byte primary OAM (Object Attribute Memory) to find up to 8 sprites that intersect the *next* scanline. These are copied to a 32-byte `oam2` (Secondary OAM).
+- **Fetching (Dots 261–320):** The PPU fetches the actual tile data for the 8 sprites found during evaluation.
+- **Latches:** The fetched sprite data is stored in `sprite_latches`. During the visible part of the next scanline, these latches are checked to see if any sprite pixel should override the background pixel.
+
+## 4. Scrolling and Timing
+- **Internal Registers:** It uses the standard `v` (current VRAM address) and `t` (temporary VRAM address) register logic for scrolling.
+- **VBlank and NMI:** The `SET_VBLANK_FLAG` event is precisely timed (triggered at scanline 241, dot 0) to ensure compatibility with sensitive timing tests like *Branch Basics*.
+- **Sprite 0 Hit:** The implementation includes a specific `sprite_0_hit_delay` to account for the pipeline delay between the PPU detecting a collision and the CPU seeing the flag in the status register.
+
+## Summary of the Flow
+1. **Initialize:** Generate the `events` table once.
+2. **Tick:**
+    - Get the current event mask.
+    - Advance shift registers.
+    - Perform VRAM fetches (NT, AT, Tile).
+    - Calculate pixel color using current shift register states + Fine-X.
+    - Update scrolling registers (`v`) if the event calls for an increment or reset.
+    - Handle Sprite Evaluation/Fetching for the next line.
+    - Emit the final pixel to the `screen` buffer.
+3. **Repeat:** 89,342 times per frame.
+
+

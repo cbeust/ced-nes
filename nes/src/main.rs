@@ -1,10 +1,8 @@
 mod rom;
-mod iced;
 mod color;
 pub mod nes_memory;
 mod emulator;
 mod joypad;
-mod app;
 mod minifb;
 mod constants;
 mod listview;
@@ -34,7 +32,6 @@ use crate::logging::init_logging;
 use crate::rom_list::find_roms_with_mappers;
 use clap::Parser;
 use tracing::debug;
-use crate::iced::main_iced;
 use crate::minifb::main_minifb;
 use crate::vizia::{create_vizia_app};
 
@@ -155,7 +152,6 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match LIBRARY {
-        Library::Iced => { main_iced(args, roms.clone(), rom_info, config.clone()); }
         Library::Vizia => {
             // _main2();
             create_vizia_app(args, roms.clone(), rom_info, config.clone());

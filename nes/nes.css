@@ -1,0 +1,67 @@
+:root {
+  --border-color: rgb(140, 140, 140);
+  --background-color: rgb(64, 89, 115);
+}
+
+/* Main Application Styles */
+* {
+  font-family: system-ui, -apple-system, sans-serif;
+  /*background-color: green;*/
+}
+
+.main-panel {
+  background-color: rgb(80, 80, 80);
+  padding: 10px;
+  gap: 10px;
+}
+
+.controls-panel {
+  width: 1s;
+  background-color: var(--background-color);
+  border-color: var(--border-color);
+  padding-top: 30px;
+}
+
+.sound-panel {
+  border-color: var(--border-color);
+  background-color: var(--background-color);
+  gap: 20px;
+  padding-top: 30px;
+  width: 1.0s;
+}
+
+.rom-name {
+  width: 340px;
+  background-color: var(--background-color);
+  gap: 20px;
+  padding: 10px;
+  border-color: var(--border-color);
+  border-width: 1px;
+  corner-radius: 8px;
+}
+
+.rom-list {
+  height: 1s;
+  border-width: 1px;
+  border-color: var(--border-color);
+  background-color: var(--background-color);
+  width: 340px;
+  gap: 10px;
+  padding: 10px;
+  corner-radius: 8px;
+}
+
+.rom-panel {
+  height: 1s;
+  gap: 10px;
+}
+
+.canvas {
+  /*width: 409px;*/
+  /*height: 384px;*/
+}
+
+.nes-checkbox {
+  gap: 12px;
+  width: auto;
+}

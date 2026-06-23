@@ -50,6 +50,7 @@ pub struct Apu {
     frame_counter_irq: bool,
     cycle_count: u64,
 
+    gui_sound_enabled: bool,
     gui_pulse1_enabled: bool,
     gui_pulse2_enabled: bool,
     gui_triangle_enabled: bool,
@@ -81,6 +82,7 @@ impl Apu {
             irq_enabled_needs_to_be_cleared: false,
             frame_counter_irq: false,
 
+            gui_sound_enabled: true,
             gui_pulse1_enabled: true,
             gui_pulse2_enabled: true,
             gui_triangle_enabled: true,
@@ -217,6 +219,10 @@ impl Apu {
     }
 
     fn calculate_output_sample(&self) -> f32 {
+        if ! self.gui_sound_enabled {
+            return 0.0;
+        }
+
         let p1 = if self.gui_pulse1_enabled { self.pulse1.output() } else { 0 };
         let p2 = if self.gui_pulse2_enabled { self.pulse2.output() } else { 0 };
         let triangle = if self.gui_triangle_enabled { self.triangle.output() } else { 0 };
@@ -377,22 +383,19 @@ impl Apu {
         self.local_buffer.clear();
     }
 
-    pub fn set_pulse1_enabled(&mut self, enabled: bool) {
-        self.gui_pulse1_enabled = enabled;
+    pub fn set_sound_enabled(&mut self, enabled: bool) {
+        self.gui_sound_enabled = enabled;
     }
-
+    pub fn set_pulse1_enabled(&mut self, enabled: bool) { self.gui_pulse1_enabled = enabled; }
     pub fn set_pulse2_enabled(&mut self, enabled: bool) {
         self.gui_pulse2_enabled = enabled;
     }
-
     pub fn set_triangle_enabled(&mut self, enabled: bool) {
         self.gui_triangle_enabled = enabled;
     }
-
     pub fn set_noise_enabled(&mut self, enabled: bool) {
         self.gui_noise_enabled = enabled;
     }
-
     pub fn set_dmc_enabled(&mut self, enabled: bool) {
         self.gui_dmc_enabled = enabled;
     }
