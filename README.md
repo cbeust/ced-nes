@@ -39,10 +39,10 @@ cargo run -r -- -r <rom>.nes
 
 # PPU implementation
 
-The `ppu2.rs` file implements the NES Picture Processing Unit (PPU) by simulating its internal logic as closely as possible to the official hardware diagrams (such as the one found on [NesDev](https://www.nesdev.org/w/images/default/4/4f/Ppu.svg)). Unlike high-level renderers that work scanline-by-scanline, `ppu2.rs` operates at the "dot" (pixel clock) level.
+[`ppu2.rs`](nes/src/ppu2.rs) implements the NES Picture Processing Unit (PPU) by simulating its internal logic as closely as possible to the official hardware diagrams (such as the one found on [NesDev](https://www.nesdev.org/w/images/default/4/4f/Ppu.svg)). Unlike high-level renderers that work scanline-by-scanline, `ppu2.rs` operates at the "dot" (pixel clock) level.
 
 ## 1. Event-Driven Architecture
-The core of the implementation is a large pre-calculated array of events:
+The core of the implementation is a large pre-calculated array of events which is computed in [this function](https://github.com/cbeust/ced-nes/blob/main/nes/src/ppu2.rs#L513):
 - **Event Array:** An array of `261 * 340` (the dimensions of a NTSC NES frame) elements is created during initialization via `init_events()`.
 - **Dot-by-Dot Execution:** Every time the PPU `tick()` function is called, it lookups the event(s) associated with the current dot (`x` and `scanline`).
 - **Bitmask Events:** Each entry in the array is a bitmask of actions to perform, such as:
