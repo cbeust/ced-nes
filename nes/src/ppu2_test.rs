@@ -12,7 +12,7 @@ fn test_ppu2_events() {
         assert_ne!(ppu.events[index + 7] & BG_MSBITS, 0);
         assert_ne!(ppu.events[index + 8] & INC_HORIZ_V, 0);
     }
-    assert_eq!(ppu.events[241 * WIDTH + 0], SET_VBLANK_FLAG);
+    assert_eq!(ppu.events[241 * WIDTH + 1], SET_VBLANK_FLAG);
 
     let y = 261;
     let index = y * WIDTH;
@@ -156,7 +156,8 @@ fn test_ppu2_pattern_shift_registers_advance_on_visible_dot_when_bg_enabled() {
     ppu.tick(false, true, &mut memory);
 
     assert_eq!(ppu.pattern_shift_low, 0x8002);
-    assert_eq!(ppu.pattern_shift_high, 0x0000);
+    // NES hardware background high-bit plane serial input pulls up to 1
+    assert_eq!(ppu.pattern_shift_high, 0x0001);
 }
 
 #[test]
@@ -268,6 +269,7 @@ fn test_ppu2_leftmost_8_pixels_clip_sprites() {
     // Sprite 0 produces color index 1 at x=0.
     ppu.sprite_latches.push(SpriteLatch {
         source_index: 0,
+        is_sprite_0: false,
         attr: 0,
         x: 0,
         low: 0x80,
@@ -294,6 +296,7 @@ fn test_ppu2_leftmost_8_pixels_show_sprites_when_unclipped() {
 
     ppu.sprite_latches.push(SpriteLatch {
         source_index: 0,
+        is_sprite_0: false,
         attr: 0,
         x: 0,
         low: 0x80,
@@ -326,6 +329,7 @@ fn test_ppu2_sprite0_hit_requires_source_index_0() {
     // Non-transparent sprite pixel at x=0, but this is NOT sprite 0 from primary OAM.
     ppu.sprite_latches.push(SpriteLatch {
         source_index: 5,
+        is_sprite_0: false,
         attr: 0,
         x: 0,
         low: 0x80,
@@ -354,20 +358,17 @@ fn test_ppu2_sprite0_hit_set_for_source_index_0() {
 
     ppu.sprite_latches.push(SpriteLatch {
         source_index: 0,
+        is_sprite_0: true,
         attr: 0,
         x: 8,
         low: 0x80,
         high: 0x00,
     });
 
-    ppu.tick(true, true, &mut memory);
-    assert_eq!(memory.get_force(0x2002) & (1 << BIT_SPRITE_0_HIT), 0);
-
-    ppu.tick(true, true, &mut memory);
-    assert_eq!(memory.get_force(0x2002) & (1 << BIT_SPRITE_0_HIT), 0);
-
-    ppu.tick(true, true, &mut memory);
-    assert_eq!(memory.get_force(0x2002) & (1 << BIT_SPRITE_0_HIT), 0);
+    for _ in 0..2 {
+        ppu.tick(true, true, &mut memory);
+        assert_eq!(memory.get_force(0x2002) & (1 << BIT_SPRITE_0_HIT), 0);
+    }
 
     ppu.tick(true, true, &mut memory);
     assert_ne!(memory.get_force(0x2002) & (1 << BIT_SPRITE_0_HIT), 0);
@@ -409,9 +410,9 @@ fn test_ppu2_frame_wrap_starts_at_dot_zero() {
     // With rendering enabled, odd frames skip dot 0 at frame start.
     ppu.tick(true, true, &mut memory);
 
-    assert_eq!(ppu.event_index, 1);
+    assert_eq!(ppu.event_index, 0);
     assert_eq!(ppu.scanline, 0);
-    assert_eq!(ppu.x, 1);
+    assert_eq!(ppu.x, 0);
 }
 
 #[test]
@@ -428,8 +429,34 @@ fn test_ppu2_frame_wrap_odd_skip_resets_sprite_state() {
 
     ppu.tick(true, true, &mut memory);
 
-    assert_eq!(ppu.event_index, 1);
+    assert_eq!(ppu.event_index, 0);
     assert_eq!(ppu.oam2_eval_index, 0);
     assert_eq!(ppu.oam2_clear_index, 0);
     assert_eq!(ppu.sprite_fetch_index, 0);
+}
+
+#[test]
+fn test_ppu2_more_than_8_sprites_per_scanline_fetched_for_rendering() {
+    let mut ppu = Ppu2::new(&mut MapperBase::new(&Rom::default()));
+    let mut memory = NesMemory::new_for_testing();
+    memory.ppu_mask = crate::ppu_mask::PpuMask::new(0x18);
+
+    // Place 12 sprites on scanline 10 (OAM Y = 9).
+    for i in 0..12usize {
+        ppu.oam[i * 4] = 9;
+        ppu.oam[i * 4 + 1] = i as u8;
+        ppu.oam[i * 4 + 2] = 0;
+        ppu.oam[i * 4 + 3] = (i * 8) as u8;
+    }
+
+    // Advance through scanline 9 (which evaluates and fetches sprites for scanline 10).
+    ppu.event_index = 9 * WIDTH;
+    ppu.scanline = 9;
+    ppu.x = 0;
+    for _ in 0..WIDTH {
+        ppu.tick(true, true, &mut memory);
+    }
+
+    assert_eq!(ppu.sprite_latches.len(), 12);
+    assert_ne!(memory.get_force(0x2002) & (1 << BIT_SPRITE_OVERFLOW), 0);
 }

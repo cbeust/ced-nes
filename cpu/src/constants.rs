@@ -69,7 +69,7 @@ pub const RMB2_ZP_65C02: u8 = 0x27;
 pub const PLP: u8 = 0x28;
 pub const AND_IMM: u8 = 0x29;
 pub const ROL: u8 = 0x2a;
-pub const ANC2_ABS_Y: u8 = 0x2b;
+pub const ANC2_IMM: u8 = 0x2b;
 pub const NOP_2B_65C02: u8 = 0x2b;
 pub const BIT_ABS: u8 = 0x2c;
 pub const AND_ABS: u8 = 0x2d;
@@ -432,7 +432,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(PLP, 1, "PLP", 4, Unknown),
     op(AND_IMM, 2, "AND", 2, Immediate),
     op(ROL, 1, "ROL A", 2, Register_A),
-    op(ANC2_ABS_Y, 3, "rla", 2, Absolute_Y),
+    op(ANC2_IMM, 2, "anc", 2, Immediate),
     op(BIT_ABS, 3, "BIT", 4, Absolute),
     op(AND_ABS, 3, "AND", 4, Absolute),
     op(ROL_ABS, 3, "ROL", 6, Absolute),
@@ -450,7 +450,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(SEC, 1, "SEC", 2, Unknown),   // 8
     op(AND_ABS_Y, 3, "AND", 4, Absolute_Y), // 9
     op(NOP_2, 1, "nop", 1, Unknown),
-    op(ANC2_ABS_Y, 2, "anc", 2, Immediate),
+    op(RLA_ABS_Y, 3, "rla", 7, Absolute_Y),
     op(NOP_3C_ABS_X, 3, "nop", 5, Absolute_X),
     op(AND_ABS_X, 3, "AND", 4, Absolute_X),
     op(ROL_ABS_X, 3, "ROL", 7, Absolute_X),
@@ -550,7 +550,7 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(BCC, 2, "BCC", 2, Relative),
     op(STA_IND_Y, 2, "STA", 6, Indirect_Y),
     op(JAM_9, 0, "JAM", 3, Zpi),
-    op(SHA_ABS_Y, 3, "sha", 6, Absolute_Y),
+    op(SHA_IND_Y, 2, "sha", 6, Indirect_Y),
     op(STY_ZP_X, 2, "STY", 4, Zp_X),
     op(STA_ZP_X, 2, "STA", 4, Zp_X),
     op(STX_ZP_Y, 2, "STX", 4, Zp_Y),
@@ -561,8 +561,8 @@ pub const OPERANDS_6502: [Operand; 256] = [
     op(TAS_ABS_Y, 3, "tas", 5, Absolute_Y),
     op(SHY_ABS_X, 3, "shy", 5, Absolute_X),
     op(STA_ABS_X, 3, "STA", 5, Absolute_X),
-    op(SHX_ABS_X, 3, "shx", 5, Absolute_X),
-    op(SHA_IND_Y, 3, "sha", 5, Indirect_Y),
+    op(SHX_ABS_X, 3, "shx", 5, Absolute_Y),
+    op(SHA_ABS_Y, 3, "sha", 5, Absolute_Y),
 
     // a0-af
     op(LDY_IMM, 2, "LDY", 2, Immediate),

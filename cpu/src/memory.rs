@@ -27,6 +27,9 @@ pub trait Memory {
     fn disassemble(&mut self, operands: &[Operand], address: u16, labels: &Labels) -> DisassemblyLine {
         Disassemble::disassemble(&self.main_memory(), operands, address, labels)
     }
+
+    fn check_nmi(&mut self) -> bool { false }
+    fn check_cancel_nmi(&mut self) -> bool { false }
 }
 
 pub struct DefaultMemory {

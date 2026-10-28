@@ -1,5 +1,4 @@
-﻿use crate::constants::{CPU_TYPE_NEW};
-use crate::mappers::mapper::Mapper;
+﻿use crate::mappers::mapper::Mapper;
 use crate::mappers::mapper_config::MapperConfig;
 use crate::nes_memory::NesMemory;
 use crate::rom::{Mirroring, Rom, PRG_ROM_SIZE};
@@ -98,14 +97,6 @@ impl Mapper for MapperMMC1 {
 
     fn write_prg(&mut self, address: u16, value: u8, config: &mut MapperConfig) {
         if address < 0x8000 { return; }
-        if ! CPU_TYPE_NEW {
-            // Ignore consecutive writes (e.g. INC)
-            // let cycles = *CYCLES.read().unwrap();
-            // if self.last_cycle_write == cycles {
-            //    return;
-            // }
-            // self.last_cycle_write = cycles;
-        }
 
         // Reset if bit 7 set
         if value & 0x80 != 0 {

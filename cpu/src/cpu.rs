@@ -1030,7 +1030,7 @@ impl <T: Memory> Cpu<T> {
                 self.a = self.a & self.memory.get(pc.wrapping_add(1));
                 self.a = self.lsr(self.a);
             }
-            ANC_IMM | ANC2_ABS_Y => {
+            ANC_IMM | ANC2_IMM => {
                 self.a = self.a & self.memory.get(pc.wrapping_add(1));
                 self.p.set_nz_flags(self.a);
                 self.p.set_c((self.a & (1 << 7)) != 0);

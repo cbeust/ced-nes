@@ -8,12 +8,49 @@ use tracing::{debug};
 
 pub const MEMORY_SIZE: usize = 65_536;
 
-use crate::ppu2::{BIT_SPRITE_OVERFLOW, BIT_VBL};
+use crate::ppu2::BIT_VBL;
 use crate::ppu2::Ppu2;
 use crate::ppu_ctrl::PpuCtrl;
 use crate::ppu_mask::PpuMask;
 use crate::rom::Mirroring;
 use crate::set_bit_with_mask;
+
+/// Cycle-accurate OAM DMA ($4014) state — runs interleaved with DMC DMA.
+#[derive(Clone, Debug)]
+pub struct OamDma {
+    /// Page << 8 base address.
+    pub page: u16,
+    /// Next OAM address to write (starts at OAMADDR).
+    pub oam_addr: u8,
+    /// Bytes transferred so far (0..256).
+    pub bytes_done: u16,
+    /// Latched CPU byte waiting for put, if any.
+    pub latched: Option<u8>,
+    /// True after the halt cycle has completed.
+    pub halted: bool,
+    /// After halt on a get cycle, spend one put as alignment before first get.
+    pub need_align: bool,
+    /// After a DMC sample get steals a get cycle, spend one put as OAM alignment.
+    pub align_after_dmc: bool,
+}
+
+impl OamDma {
+    pub fn new(page: u8, oam_addr: u8) -> Self {
+        Self {
+            page: (page as u16) << 8,
+            oam_addr,
+            bytes_done: 0,
+            latched: None,
+            halted: false,
+            need_align: false,
+            align_after_dmc: false,
+        }
+    }
+
+    pub fn done(&self) -> bool {
+        self.bytes_done >= 256 && self.latched.is_none()
+    }
+}
 
 pub struct NesMemory{
     pub ir: IR,
@@ -23,13 +60,35 @@ pub struct NesMemory{
     pub ppu_ctrl: PpuCtrl,
     pub ppu_mask: PpuMask,
     pub joypad: Arc<RwLock<Joypad>>,
+    /// Controller 2 ($4017 reads). Strobe is shared with controller 1 via $4016 writes.
+    pub joypad2: Arc<RwLock<Joypad>>,
 
     ppu: Arc<RwLock<Ppu2>>,
 
     apu: Arc<RwLock<Apu>>,
-    internal_buffer: u8,
+    pub(crate) internal_buffer: u8,
     pub mapper: MapperBase,
+    /// Legacy bulk-OAM flag (unused when `oam_dma` is Some).
     pub(crate) pause_cpu_for_dma: bool,
+    /// Active cycle-stepped OAM DMA, if any.
+    pub(crate) oam_dma: Option<OamDma>,
+    /// True while OAM DMA is performing a get (sprite fetch). When set and the
+    /// 6502 bus is outside $4000–$401F, APU registers are inactive (open bus).
+    pub(crate) oam_dma_fetching: bool,
+    /// Approximate 6502 core address while halted (for APU register activation).
+    pub(crate) cpu_bus_address: u16,
+    /// Last value driven on the CPU data bus (CPU open bus).
+    /// Updated on every bus read/write except $4015 (does not drive the bus).
+    /// DMC DMA sample fetches update it too.
+    pub(crate) cpu_data_bus: u8,
+    /// Last value on the 2A03 internal data bus (drives bit 5 of $4015 reads).
+    pub(crate) cpu_internal_bus: u8,
+    pub nmi_requested: bool,
+    pub nmi_cancel_requested: bool,
+    prev_nmi_line_low: bool,
+    pub total_ppu_dots: u64,
+    pub nmi_low_start_dot: u64,
+    pub nmi_delay: u8,
 }
 
 impl NesMemory{
@@ -56,11 +115,23 @@ impl NesMemory{
             ppu_mask: PpuMask::new(0),
             memory,
             joypad,
+            joypad2: Arc::new(RwLock::new(Joypad::new())),
             ppu,
             apu,
             internal_buffer: 0,
             mapper,
             pause_cpu_for_dma: false,
+            oam_dma: None,
+            oam_dma_fetching: false,
+            cpu_bus_address: 0,
+            cpu_data_bus: 0,
+            cpu_internal_bus: 0,
+            nmi_requested: false,
+            nmi_cancel_requested: false,
+            prev_nmi_line_low: false,
+            total_ppu_dots: 0,
+            nmi_low_start_dot: 0,
+            nmi_delay: 0,
         }
     }
 
@@ -164,10 +235,37 @@ impl NesMemory{
         }
     }
 
+    pub fn update_nmi_line(&mut self) {
+        let vbl = (self.memory[0x2002] & (1 << BIT_VBL)) != 0;
+        let nmi_enable = self.is_vbl_enabled();
+        let line_low = vbl && nmi_enable;
+        if line_low && !self.prev_nmi_line_low {
+            self.nmi_low_start_dot = self.total_ppu_dots;
+            if self.total_ppu_dots % 3 == 0 {
+                self.nmi_delay = 1;
+                self.nmi_requested = false;
+            } else {
+                self.nmi_delay = 0;
+                self.nmi_requested = true;
+            }
+        } else if !line_low && self.prev_nmi_line_low {
+            let duration = self.total_ppu_dots.saturating_sub(self.nmi_low_start_dot);
+            if duration <= 1 {
+                self.nmi_requested = false;
+                self.nmi_delay = 0;
+                self.nmi_cancel_requested = true;
+            }
+        }
+        self.prev_nmi_line_low = line_low;
+    }
+
     pub fn set_bit(&mut self, address: u16, bit: u8) {
         let current = self.get_force(address);
         let new_value = current | (1 << bit);
         self.set_force(address, new_value);
+        if address == 0x2002 && bit == BIT_VBL {
+            self.update_nmi_line();
+        }
     }
 
     pub fn get_force(&mut self, address: u16) -> u8 { self.memory[address as usize] }
@@ -175,6 +273,9 @@ impl NesMemory{
     pub fn clear_bit(&mut self, address: u16, bit: u8) {
         let current = self.get_force(address);
         self.set_force(address, current & !(1 << bit));
+        if address == 0x2002 && bit == BIT_VBL {
+            self.update_nmi_line();
+        }
     }
 
     fn get2(&mut self, original_address: u16) -> u8 {
@@ -185,20 +286,36 @@ impl NesMemory{
         let mut result = self.memory[address as usize];
         if ! self.init && Self::is_register(address) {
             match address {
-                0x2000 | 0x2001 | 0x2003 => {
-                    // Write only registers, return the open bus
-                    result = self.ppu.read().unwrap().get_open_bus();
+                0x2000 | 0x2001 | 0x2003 | 0x2005 | 0x2006 => {
+                    // Write-only PPU registers: reads return PPU open bus.
+                    // Reading write-only registers does NOT update the open bus latch.
+                    return self.ppu.read().unwrap().get_open_bus();
                 }
                 0x2002 => {
                     // w:                  <- 0
                     self.ir.w = false;
+                    let (scanline, x) = {
+                        let ppu = self.ppu.read().unwrap();
+                        (ppu.scanline, ppu.x)
+                    };
+
+                    if scanline == 261 && x == 0 {
+                        result &= !0x60;
+                    }
+                    if scanline == 241 && x == 0 {
+                        self.ppu.write().unwrap().vblank_suppressed = true;
+                    }
+                    if scanline == 241 && (x == 1 || x == 2) {
+                        self.nmi_cancel_requested = true;
+                        self.nmi_requested = false;
+                        self.ppu.write().unwrap().nmi_suppressed = true;
+                    }
                     // VSOx xxxx
                     // |||| ||||
                     // |||+-++++- (PPU open bus or 2C05 PPU identifier)
-                    // ||+------- Sprite overflow flag
-                    // |+-------- Sprite 0 hit flag
+                    // ||+------- Sprite overflow flag (NOT cleared on read, only at dot 1 of pre-render line)
+                    // |+-------- Sprite 0 hit flag (NOT cleared on read, only at dot 1 of pre-render line)
                     // +--------- Vblank flag, cleared on read. Unreliable; see below.
-                    self.clear_bit(0x2002, BIT_SPRITE_OVERFLOW);
                     self.clear_bit(0x2002, BIT_VBL);
                     // $2002: bits 0 through 4 are open bus
                     result = (result & 0b1110_0000)
@@ -209,14 +326,19 @@ impl NesMemory{
                     self.ppu.write().unwrap().set_open_bus(open_bus);
                 }
                 0x2004 => {
-                    let oam_address = self.ppu.read().unwrap().oam_address;
-                    result = self.ppu.read().unwrap().oam[oam_address as usize];
-                    // Third sprite byte need to be masked with 0xe3 because bits 2,3,4 are unused
-                    if (oam_address % 4) % 2 == 2 {
-                        result = result & 0xe3;
+                    let (scanline, oam_buffer, oam_address) = {
+                        let ppu = self.ppu.read().unwrap();
+                        (ppu.scanline, ppu.oam_buffer, ppu.oam_address)
+                    };
+                    let rendering_enabled = self.ppu_mask.is_rendering_enabled();
+                    if rendering_enabled && scanline < 240 {
+                        result = oam_buffer;
+                    } else {
+                        result = self.ppu.read().unwrap().oam[oam_address as usize];
+                        if oam_address % 4 == 2 {
+                            result &= 0xe3;
+                        }
                     }
-                    debug!(target: "oam", "Reading OAMDATA $2004 [{:04X}]:{:02X}",
-                        oam_address, result);
                     // Note: reads don't increment oam_address, only writes
                 }
                 0x2007 => {
@@ -225,6 +347,10 @@ impl NesMemory{
 
                     // let is_palette = a >= 0x3f00 && a <= 0x3fff;
                     let is_palette = (a & 0x3f00) == 0x3f00;
+                    let is_rendering = (self.ppu_mask.background_rendering()
+                        || self.ppu_mask.sprite_rendering())
+                        && (self.ppu.read().unwrap().scanline < 240
+                            || self.ppu.read().unwrap().scanline == 261);
 
                     result = if is_palette {
                         // If palette address, return the direct result and not the internal buffer
@@ -232,8 +358,10 @@ impl NesMemory{
                         // at the specified address, "underneath" the palette data,
                         let a2 = 0x3f00 + (a & 0x1f);
                         let vram = self.ppu.read().unwrap().get_vram(a2, &mut self.mapper);
-                        let ts = 0x2f00 + (a & 0xff);
-                        self.internal_buffer = self.ppu.read().unwrap().get_vram(ts, &mut self.mapper);
+                        if !is_rendering {
+                            let ts = 0x2f00 + (a & 0xff);
+                            self.internal_buffer = self.ppu.read().unwrap().get_vram(ts, &mut self.mapper);
+                        }
                         debug!(target: "vram", "Reading VRAM palette [{a:04X}/{a2:02X}]:{:02X} and \
                         set internal_buffer to {:02X}",
                             result, self.internal_buffer);
@@ -254,41 +382,76 @@ impl NesMemory{
                         // Regular VRAM read, return the internal buffer then update the internal
                         // buffer to the actual VRAM value
                         let result = self.internal_buffer;
-                        self.internal_buffer = self.ppu.read().unwrap().get_vram(a, &mut self.mapper);
+                        if !is_rendering {
+                            self.internal_buffer = self.ppu.read().unwrap().get_vram(a, &mut self.mapper);
+                        }
                         debug!(target: "vram","Reading VRAM [{a:04X}] Old internal_buffer:{:02X} \
                         new internal_buffer and value returned:{:02X}",
                             self.internal_buffer, result);
                         result
                     };
 
-                    let increment = if (self.ppu_mask.background_rendering()
-                        || self.ppu_mask.sprite_rendering())
-                        && self.ppu.read().unwrap().scanline < 240
-                    {
-                        // Increment both coarse X and Y
-                        0x1001
+                    if is_rendering {
+                        self.ppu.write().unwrap().pending_2007_read_delay = 5;
                     } else {
-                        self.ppu_ctrl.vram_increment
-                    };
-
-                    self.ir.increment_v(increment);
+                        self.ir.increment_v(self.ppu_ctrl.vram_increment);
+                    }
 
                     debug!(target: "ir", "IR:{}: $2007 read {result:02X}", self.ir);
                 }
                 0x4015 => {
-                    result = self.apu.write().unwrap().get(address);
+                    // APU regs active only when 6502 bus is in $4000–$401F
+                    // (AccuracyCoin APU Register Activation). During OAM DMA from
+                    // page $40 with CPU halted elsewhere, reads are open bus.
+                    let apu_active = !self.oam_dma_fetching
+                        || (self.cpu_bus_address & 0xFFE0) == 0x4000;
+                    if apu_active {
+                        result = (self.apu.write().unwrap().get(0x4015) & 0xDF)
+                            | (self.cpu_internal_bus & 0x20);
+                    } else {
+                        result = self.cpu_data_bus;
+                    }
                 }
 
-                // Joypad
+                // Joypad 1 — D0 is serial data; D1–D4 are 0 on a standard NES port
+                // (no expansion); D5–D7 are open bus. AccuracyCoin Bus Conflicts
+                // returns A=$50 which is this pattern — if D1–D7 are all open bus,
+                // A becomes $FF and the menu shows the test as "skipped".
                 0x4016 => {
-                    // TODO: Enabling this makes the cursor move down
-                    result = self.joypad.write().unwrap().read();
+                    let apu_active = !self.oam_dma_fetching
+                        || (self.cpu_bus_address & 0xFFE0) == 0x4000;
+                    if apu_active {
+                        let bit0 = self.joypad.write().unwrap().read() & 1;
+                        result = (self.cpu_data_bus & 0xE0) | bit0;
+                    } else {
+                        result = self.cpu_data_bus;
+                    }
+                }
+                // Joypad 2 (write to $4017 is the APU frame counter — see set2)
+                0x4017 => {
+                    let apu_active = !self.oam_dma_fetching
+                        || (self.cpu_bus_address & 0xFFE0) == 0x4000;
+                    if apu_active {
+                        let bit0 = self.joypad2.write().unwrap().read() & 1;
+                        result = (self.cpu_data_bus & 0xE0) | bit0;
+                    } else {
+                        result = self.cpu_data_bus;
+                    }
+                }
+                // Unreadable APU / write-only registers: CPU open bus.
+                // (High-byte-of-address is only correct when that was the last bus
+                // activity, e.g. the absolute address high byte of LDA $4000.
+                // DMC DMA sample fetches also leave their value on the bus.)
+                0x4000..=0x4014 => {
+                    result = self.cpu_data_bus;
                 }
                 _ => {
-                    result = ((address & 0xff00) >> 8) as u8;
+                    result = self.cpu_data_bus;
                 }
             }
-            self.ppu.write().unwrap().set_open_bus(result);
+            if address == 0x2004 || address == 0x2007 {
+                self.ppu.write().unwrap().set_open_bus(result);
+            }
         }
 
         // if address == 0x2002 || address == 0x2004 || address == 0x2007
@@ -321,7 +484,9 @@ impl NesMemory{
             match address {
                 0x2000 => {
                     // PPUCTRL
+                    self.memory[0x2000] = value;
                     self.ppu_ctrl = PpuCtrl::new(value);
+                    self.update_nmi_line();
                     debug!(target: "2000", "PPU CTRL: {} VBL:{}", self.ppu_ctrl,
                         (value & 0b1000_0000) != 0);
 
@@ -332,8 +497,30 @@ impl NesMemory{
                     // ;;; Test 2 [PPU Open Bus]: All PPU Registers update PPU Open Bus. ;;;
                 }
                 0x2001 => {
+
                     // PPUMASK – rendering bits take effect after a 3/4-dot delay.
                     debug!(target: "2001", "Writing PPUMASK $2001: {value:02X}");
+                    let old_rendering = self.ppu_mask.is_rendering_enabled();
+                    let new_rendering = (value & 0x18) != 0;
+                    if old_rendering && !new_rendering {
+                        let (scanline, x, oam2_eval_index) = {
+                            let ppu = self.ppu.read().unwrap();
+                            (ppu.scanline, ppu.x, ppu.oam2_eval_index)
+                        };
+                        if scanline < 240 || scanline == 261 {
+                            let sec_oam_addr = if (1..=64).contains(&x) {
+                                ((x + 2) / 2) as u8
+                            } else if (65..=256).contains(&x) {
+                                (oam2_eval_index as u8 / 4) * 4
+                            } else {
+                                0
+                            };
+                            let row = sec_oam_addr;
+                            if row > 0 {
+                                self.ppu.write().unwrap().pending_oam_corruption_row = Some(row);
+                            }
+                        }
+                    }
                     self.ppu_mask.from_write(value);
                 }
                 0x2002 => {
@@ -347,12 +534,19 @@ impl NesMemory{
                 }
                 0x2004 => {
                     // OAMDATA
+                    let (scanline, _) = {
+                        let ppu = self.ppu.read().unwrap();
+                        (ppu.scanline, ppu.x)
+                    };
+                    let rendering_enabled = self.ppu_mask.is_rendering_enabled();
                     let mut ppu = self.ppu.write().unwrap();
-                    let a = ppu.oam_address;
-                    ppu.write_oam(a, value);
-                    ppu.oam_address = a.wrapping_add(1);
-                    debug!(target: "oam", "Writing OAMDATA $2004 [{:02X}]={:02X} new address:{:04X}",
-                        a, value, a.wrapping_add(1));
+                    if rendering_enabled && (scanline < 240 || scanline == 261) {
+                        ppu.oam_address = (ppu.oam_address.wrapping_add(4)) & 0xFC;
+                    } else {
+                        let a = ppu.oam_address;
+                        ppu.write_oam(a, value);
+                        ppu.oam_address = a.wrapping_add(1);
+                    }
                 }
                 0x2005 => {
                     // PPUSCROLL
@@ -412,17 +606,22 @@ impl NesMemory{
                     // simultaneously (with normal wrapping behavior)
                 }
                 0x4014 => {
-                    // info!("DMA WRITE ACCESS {value:02X}");
-                    let address = value as u16 * 0x100;
-                    let offset = self.ppu.read().unwrap().oam_address;
-                    for i in 0..=255 {
-                        let i2 = (i + offset as u16) as u8;
-                        let v = self.get(address + i);
-                        self.ppu.write().unwrap().write_oam(i2, v);
+                    // Schedule cycle-accurate OAM DMA (halt on the next CPU cycle).
+                    // Copy happens one get/put pair per cycle so DMC DMA can interleave
+                    // (AccuracyCoin DMC DMA + OAM DMA).
+                    let oam_addr = self.ppu.read().unwrap().oam_address;
+                    self.oam_dma = Some(OamDma::new(value, oam_addr));
+                    self.pause_cpu_for_dma = false;
+                    {
+                        let mut ppu = self.ppu.write().unwrap();
+                        ppu.pending_oam_corruption_row = None;
+                        ppu.oam_corruption_armed = false;
                     }
-                    self.pause_cpu_for_dma = true;
-                    debug!(target: "oam", "Writing PPU $4014={value:02X}, \
-                     copied 256 bytes from cpu[{:04X}] to OAM", address + offset as u16);
+                    debug!(
+                        target: "oam",
+                        "Writing PPU $4014={value:02X}, OAM DMA scheduled from ${:04X}",
+                        (value as u16) << 8
+                    );
                 }
                 0x4000..=0x4013 => {
                     self.apu.write().unwrap().set(address, value);
@@ -430,14 +629,21 @@ impl NesMemory{
                 0x4015 | 0x4017 => {
                     self.apu.write().unwrap().set(address, value);
                 }
-                // Joypad
+                // Joypad strobe (both controllers share the $4016 strobe line).
                 0x4016 => {
-                    self.joypad.write().unwrap().write(value);
+                    let on_put = !self.apu.read().unwrap().is_get_phase();
+                    self.joypad.write().unwrap().write(value, on_put);
+                    self.joypad2.write().unwrap().write(value, on_put);
                 }
                 _ => {
                 }
             }
-            self.ppu.write().unwrap().set_open_bus(value);
+            // PPU open bus is only driven by PPU register access ($2000–$2007),
+            // not APU/IO ($4000+). STA $2002 to seed open bus for $3FFE execution
+            // (AccuracyCoin APU Register Activation) must survive later $401x writes.
+            if (0x2000..=0x2007).contains(&address) {
+                self.ppu.write().unwrap().set_open_bus(value);
+            }
         }
         if address != 0x2002 {
             self.set_force(address, value);
@@ -447,19 +653,109 @@ impl NesMemory{
 
 const REGISTER_LOWER_BOUND: u16 = 0x4800;
 
+#[cfg(test)]
+mod open_bus_tests {
+    use super::*;
+    use cpu::memory::Memory;
+
+    #[test]
+    fn lda_absolute_open_bus_returns_high_address_byte() {
+        let mut mem = NesMemory::new_for_testing();
+        // Simulate the bus activity of LDA $4000:
+        // read opcode, low, high — last value on the bus is $40.
+        let _ = mem.get(0x8000); // dummy (would be opcode)
+        mem.cpu_data_bus = 0x40; // absolute address high byte
+        assert_eq!(mem.get(0x4000), 0x40);
+    }
+
+    #[test]
+    fn dmc_dma_sample_updates_open_bus() {
+        let mut mem = NesMemory::new_for_testing();
+        mem.cpu_data_bus = 0x40;
+        // Simulate DMC DMA reading a $00 sample byte.
+        mem.cpu_data_bus = 0x00;
+        assert_eq!(mem.get(0x4000), 0x00);
+    }
+}
+
 impl  Memory for NesMemory{
     fn get(&mut self, address: u16) -> u8 {
-        if address >= REGISTER_LOWER_BOUND {
+        // CPU map: $0000–$401F via get2 (RAM/PPU/APU/io), $4020–$5FFF open bus
+        // on NROM (AccuracyCoin open-bus pre-tests), $6000–$7FFF cart WRAM,
+        // $8000–$FFFF PRG ROM.
+        //
+        // APU register activation (AccuracyCoin): when the 6502 address bus is
+        // in $4000–$401F (e.g. CPU halted mid-instruction there during OAM),
+        // APU $4015/$4016/$4017 are readable as mirrors every $20 bytes.
+        // Open-bus pages ($40xx unreadable / $4020–$5FFF): pure APU/controller.
+        // RAM pages: $4015 bus-conflicts (bit 5 from RAM); controllers do not
+        // override RAM data (test 7), though they may still be clocked.
+        let apu_active = !self.oam_dma_fetching
+            || (self.cpu_bus_address & 0xFFE0) == 0x4000;
+        let apu_mirror = address & 0x1F;
+        let result = if self.oam_dma_fetching
+            && apu_active
+            && matches!(apu_mirror, 0x15 | 0x16 | 0x17)
+        {
+            let underlying = if address >= 0x8000 {
+                self.mapper.read_prg(address)
+            } else if address >= 0x6000 {
+                self.mapper.read_prg(address)
+            } else if address >= 0x4020 {
+                self.cpu_data_bus
+            } else if address >= 0x4000 {
+                self.cpu_data_bus
+            } else if address < 0x2000 {
+                self.memory[(address & 0x7FF) as usize]
+            } else {
+                self.cpu_data_bus
+            };
+            let open_bus_region = address >= 0x4000;
+            match apu_mirror {
+                0x15 => {
+                    // APU drives D0–D4, D6–D7; D5 is open bus → from other device.
+                    let status = self.apu.write().unwrap().get(0x4015);
+                    (status & 0xDF) | (underlying & 0x20)
+                }
+                0x16 | 0x17 if open_bus_region => {
+                    self.get2(0x4000 | apu_mirror)
+                }
+                0x16 | 0x17 => {
+                    // Still clock the port (some consoles do) but RAM wins the bus.
+                    let _ = self.get2(0x4000 | apu_mirror);
+                    underlying
+                }
+                _ => underlying,
+            }
+        } else if address >= 0x8000 {
             self.mapper.read_prg(address)
+        } else if address >= 0x6000 {
+            self.mapper.read_prg(address)
+        } else if address >= 0x4018 {
+            // Expansion area / disabled APU test regs: no device on NROM → CPU open bus.
+            self.cpu_data_bus
         } else {
             self.get2(address)
+        };
+        // Reading $4015 does **not** update the external CPU data bus for a
+        // normal CPU access (AccuracyCoin Internal Data Bus). OAM DMA puts the
+        // fetched byte on the bus when writing OAM, so mirrors/status reads
+        // during OAM *do* update open bus (APU Register Activation table).
+        self.cpu_internal_bus = result;
+        if address != 0x4015 || self.oam_dma_fetching {
+            self.cpu_data_bus = result;
         }
+        result
     }
 
     fn set(&mut self, address: u16, value: u8) {
-        if address >= REGISTER_LOWER_BOUND {
-            // self.set_force(address, value);
+        // Every bus write drives the CPU data bus.
+        self.cpu_data_bus = value;
+        self.cpu_internal_bus = value;
+        if address >= 0x6000 {
             self.mapper.write_prg(address, value);
+        } else if address >= 0x4018 {
+            // Open bus region — writes ignored on NROM.
         } else {
             self.set2(address, value);
         }
@@ -483,6 +779,53 @@ impl  Memory for NesMemory{
     }
 
     fn main_memory(&mut self) -> Vec<u8> {
-        self.memory.clone()
+        // Full CPU-visible 64K for the debugger. Cartridge space ($6000–$FFFF)
+        // is not stored in `self.memory`; it must be read through the mapper
+        // (same as `get`), otherwise PRG looks like zeros and disassembly is BRK.
+        let mut result = vec![0u8; MEMORY_SIZE];
+        for addr in 0u32..MEMORY_SIZE as u32 {
+            let a = addr as u16;
+            result[addr as usize] = if a >= 0x6000 {
+                self.mapper.read_prg(a)
+            } else if a >= 0x4020 {
+                // Expansion / open-bus region on NROM
+                0
+            } else if a < 0x2000 {
+                self.memory[(a & 0x7FF) as usize]
+            } else {
+                // PPU/APU/IO backing store (mirrored where applicable)
+                let m = Self::cpu_mirrorring(a) as usize;
+                if m < self.memory.len() {
+                    self.memory[m]
+                } else {
+                    0
+                }
+            };
+        }
+        result
+    }
+
+    fn check_nmi(&mut self) -> bool {
+        if self.nmi_delay > 0 {
+            self.nmi_delay -= 1;
+            if self.nmi_delay == 0 {
+                self.nmi_requested = true;
+            }
+            false
+        } else if self.nmi_requested {
+            self.nmi_requested = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn check_cancel_nmi(&mut self) -> bool {
+        if self.nmi_cancel_requested {
+            self.nmi_cancel_requested = false;
+            true
+        } else {
+            false
+        }
     }
 }

@@ -2,11 +2,9 @@ pub const CAP_FPS: Option<u16> = Some(60);
 
 pub const DONKEY_KONG: &str = "Donkey_Kong.nes";
 pub const PACMAN: &str = "PacMan2.nes";
-pub const TRACE_FILE_NAME: &str = "trace.txt";
 
 const DEBUG: bool = false;
 pub const DEBUG_ASM: bool = DEBUG;
-pub const CPU_TYPE_NEW: bool = true;
 pub const _COMPARE_LOGS: bool = true;
 pub const DEBUG_MESEN: bool = false;
 pub const LOG_TO_FILE: bool = DEBUG;

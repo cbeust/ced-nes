@@ -1,6 +1,7 @@
 use crate::emulator::FRAME;
 use crate::mappers::mapper_base::MapperBase;
 use crate::nes_memory::NesMemory;
+use cpu::memory::Memory;
 use std::time::Instant;
 use tracing::{info};
 use crate::delayed::Delayed;
@@ -70,22 +71,24 @@ pub struct Ppu2 {
     pub scanline: u16,
 
     // Where we store the sprites we detected will appear on the next scanline, max 32
-    oam2: [u8; 32],
+    pub(crate) oam2: [u8; 32],
     /// Source primary OAM sprite index (0..63) for each oam2 entry (0..7).
     oam2_source_index: [u8; 8],
     /// Secondary OAM write index during sprite evaluation (0..32 step 4)
-    oam2_eval_index: usize,
+    pub oam2_eval_index: usize,
     /// Secondary OAM clear index during dots 1..64 (0..32 step 1)
     oam2_clear_index: usize,
     /// Sprite fetch cursor during dots 261..320 (0..sprite_count)
     sprite_fetch_index: usize,
 
     /// At most 8 fetched sprite rows for the next scanline.
-    sprite_latches: Vec<SpriteLatch>,
+    pub(crate) sprite_latches: Vec<SpriteLatch>,
+    sprite_counting: [bool; 64],
 
     pub(crate) oam: [u8; 256],
     pub oam_address: u8,
     open_bus: u8,
+    open_bus_decay_cycles: u32,
 
     tile_index: u8,
     pt_lsb: u8,
@@ -94,11 +97,28 @@ pub struct Ppu2 {
     /// NES colour values (0-63) stored at palette RAM indices 0-31
     palette_table: [u8; 32],
     pattern_shift_low: u16,
-    pattern_shift_high: u16,
+    pub(crate) pattern_shift_high: u16,
     attr_shift_low: u16,
     attr_shift_high: u16,
     last_screen_sent: Instant,
     sprite_0_hit_delay: i8,
+    pub vblank_suppressed: bool,
+    pub nmi_suppressed: bool,
+    pub oam2_has_sprite_zero: bool,
+    pub render_has_sprite_zero: bool,
+    eval_byte_index: u8,
+    sprite_overflow_delay: i8,
+    eval_finished: bool,
+    eval_overflow_count: u8,
+    pub oam_buffer: u8,
+    pub pending_2007_read_delay: u8,
+    pub pending_oam_corruption_row: Option<u8>,
+    /// True once rendering has actually turned off while a corruption is pending.
+    pub oam_corruption_armed: bool,
+    pub vbl_cleared_at_dot1: bool,
+    pub old_v: u16,
+    pub is_odd_frame: bool,
+    pub fetched_bg_tile: bool,
 }
 
 impl Default for Ppu2 {
@@ -124,9 +144,11 @@ impl Ppu2 {
             oam2_clear_index: 0,
             sprite_fetch_index: 0,
             sprite_latches: Vec::new(),
+            sprite_counting: [false; 64],
             oam: [0; 256],
             oam_address: 0,
             open_bus: 0,
+            open_bus_decay_cycles: 0,
             tile_index: 0,
             pt_lsb: 0,
             pt_msb: 0,
@@ -138,6 +160,22 @@ impl Ppu2 {
             attr_shift_high: 0,
             last_screen_sent: Instant::now(),
             sprite_0_hit_delay: -1,
+            vblank_suppressed: false,
+            nmi_suppressed: false,
+            oam2_has_sprite_zero: false,
+            render_has_sprite_zero: false,
+            eval_byte_index: 0,
+            sprite_overflow_delay: -1,
+            eval_finished: false,
+            eval_overflow_count: 0,
+            oam_buffer: 0,
+            pending_2007_read_delay: 0,
+            pending_oam_corruption_row: None,
+            oam_corruption_armed: false,
+            vbl_cleared_at_dot1: false,
+            old_v: 0,
+            is_odd_frame: false,
+            fetched_bg_tile: false,
         };
 
         for i in 0..DEFAULT_SPRITE_PALETTE.len() {
@@ -147,15 +185,21 @@ impl Ppu2 {
         result
     }
 
-    pub fn tick(&mut self, sprite_rendering: bool, background_rendering: bool,
+    pub fn tick(&mut self, mut sprite_rendering: bool, mut background_rendering: bool,
         memory: &mut NesMemory) -> PpuResult
     {
         let mut result = PpuResult::default();
         let mut irq_requested = false;
         let event = self.events[self.event_index];
+        memory.total_ppu_dots += 1;
 
         // Keep PPUMASK delayed enable/disable timing moving one dot per PPU tick.
+        let had_pending = memory.ppu_mask.has_pending();
         memory.ppu_mask.tick();
+        if had_pending {
+            sprite_rendering = memory.ppu_mask.sprite_rendering();
+            background_rendering = memory.ppu_mask.background_rendering();
+        }
 
         let ei = self.event_index;
         let dot_x = (ei % WIDTH) as u16;
@@ -196,18 +240,63 @@ impl Ppu2 {
             self.sprite_0_hit_delay = -1;
         }
 
-        self.event_index += 1;
-        if self.event_index >= self.events.len() {
-            // End of frame
+        if self.sprite_overflow_delay > 0 {
+            self.sprite_overflow_delay -= 1;
+        }
+
+        if self.sprite_overflow_delay == 0 {
+            memory.set_bit(0x2002, BIT_SPRITE_OVERFLOW);
+            self.sprite_overflow_delay = -1;
+        }
+
+        // OAM corruption is "seeded" when rendering is disabled mid-render, but it only
+        // happens on the first rendering dot (pre-render line..239) *after* rendering has
+        // actually been turned off and then back on. Since $2001 disables are delayed by a
+        // few dots, rendering can still be on right after the write: don't fire then.
+        if self.pending_oam_corruption_row.is_some() && !rendering_enabled_now {
+            self.oam_corruption_armed = true;
+        }
+        if rendering_enabled_now && self.oam_corruption_armed && (dot_scanline < 240 || dot_scanline == 261) {
+            self.oam_corruption_armed = false;
+            if let Some(row) = self.pending_oam_corruption_row.take() {
+                if row > 0 && ((row as usize) * 8 + 8) <= self.oam.len() {
+                    let row_start = (row as usize) * 8;
+                    self.oam.copy_within(0..8, row_start);
+                }
+            }
+        }
+
+        if self.open_bus_decay_cycles > 0 {
+            self.open_bus_decay_cycles -= 1;
+            if self.open_bus_decay_cycles == 0 {
+                self.open_bus = 0;
+            }
+        }
+
+        if dot_scanline == 261 && dot_x == 339 && self.is_odd_frame && rendering_enabled_now {
             self.event_index = 0;
-            self.x = (self.event_index % WIDTH) as u16;
-            self.scanline = (self.event_index / WIDTH) as u16;
+            self.is_odd_frame = !self.is_odd_frame;
+            self.x = 0;
+            self.scanline = 0;
+        } else {
+            self.event_index += 1;
+            if self.event_index >= self.events.len() {
+                // End of frame
+                self.event_index = 0;
+                self.is_odd_frame = !self.is_odd_frame;
+                self.x = (self.event_index % WIDTH) as u16;
+                self.scanline = (self.event_index / WIDTH) as u16;
+            }
         }
         if self.x == 0 {
             // End of scanline
             self.oam2_eval_index = 0;
             self.oam2_clear_index = 0;
             self.sprite_fetch_index = 0;
+        }
+
+        if rendering_enabled_now && (dot_scanline < 240 || dot_scanline == 261) && dot_x == 339 {
+            self.sprite_counting = [true; 64];
         }
 
         if dot_scanline < crate::constants::HEIGHT as u16
@@ -243,56 +332,69 @@ impl Ppu2 {
                 self.palette_table[0]
             };
             let mut sprite_0_hit = false;
+            let mut found_opaque_sprite = false;
 
-            // OAM order priority: first non-transparent sprite pixel wins.
-            if sprites_visible {
-                for (_, sprite) in self.sprite_latches.iter().enumerate() {
-                    let sprite_x = sprite.x;
-                    let dx = dot_x as i16 - sprite_x as i16;
-                    if dx < 0 || dx >= 8 {
+            // Clock all 8 sprite X-counters and shift registers in parallel.
+            for (i, sprite) in self.sprite_latches.iter_mut().enumerate() {
+                let counting = self.sprite_counting.get(i).copied().unwrap_or(false);
+                if counting {
+                    if sprite.x == 0 {
+                        if let Some(c) = self.sprite_counting.get_mut(i) {
+                            *c = false;
+                        }
+                    } else {
+                        sprite.x -= 1;
                         continue;
                     }
+                }
 
+                if rendering_enabled_now {
                     let h_flip = (sprite.attr & 0x40) != 0;
-                    let bit_index = if h_flip { dx as u8 } else { 7 - dx as u8 };
+                    let (s0, s1) = if h_flip {
+                        let s0 = sprite.low & 1;
+                        let s1 = sprite.high & 1;
+                        sprite.low >>= 1;
+                        sprite.high >>= 1;
+                        (s0, s1)
+                    } else {
+                        let s0 = (sprite.low >> 7) & 1;
+                        let s1 = (sprite.high >> 7) & 1;
+                        sprite.low <<= 1;
+                        sprite.high <<= 1;
+                        (s0, s1)
+                    };
+                    let sprite_color = (s1 << 1) | s0;
 
-                    let s0 = (sprite.low >> bit_index) & 1;
-                    let s1 = (sprite.high >> bit_index) & 1;
-                    let sprite_color = (s1 << 1) | s0; // 0..3
+                    if sprite_color != 0 && !found_opaque_sprite {
+                        found_opaque_sprite = true;
+                        if sprites_visible {
+                            // Sprite 0 hit: both bg and sprite non-transparent, not at x=255,
+                            // and not suppressed by left-column clipping.
+                            if sprite.is_sprite_0
+                                && bg_opaque
+                                && background_rendering
+                                && dot_x < 255
+                                && !(dot_x < 8 && (memory.ppu_mask.clip_sprites
+                                                   || memory.ppu_mask.clip_background))
+                            {
+                                sprite_0_hit = true;
+                            }
 
-                    // Sprite color index 0 is transparent.
-                    if sprite_color == 0 {
-                        continue;
+                            let behind_bg = (sprite.attr & 0x20) != 0;
+                            if !behind_bg || !bg_opaque {
+                                let sprite_palette = (sprite.attr & 0x03) as usize;
+                                let pal_idx = 0x10 + (sprite_palette << 2) + sprite_color as usize;
+                                final_color = self.palette_table[pal_idx & 0x1f];
+                            }
+                        }
                     }
-
-                    // Sprite 0 hit: both bg and sprite non-transparent, not at x=255,
-                    // and not suppressed by left-column clipping.
-                    if sprite.source_index == 0
-                        && bg_opaque
-                        && background_rendering
-                        && dot_scanline > 0
-                        && dot_x < 255
-                        && !(dot_x < 8 && (memory.ppu_mask.clip_sprites
-                                           || memory.ppu_mask.clip_background))
-                    {
-                        sprite_0_hit = true;
-                    }
-
-                    let behind_bg = (sprite.attr & 0x20) != 0;
-                    if !behind_bg || !bg_opaque {
-                        let sprite_palette = (sprite.attr & 0x03) as usize;
-                        let pal_idx = 0x10 + (sprite_palette << 2) + sprite_color as usize;
-                        final_color = self.palette_table[pal_idx & 0x1f];
-                    }
-
-                    break;
                 }
             }
 
             if sprite_0_hit && self.sprite_0_hit_delay == -1 {
-                self.sprite_0_hit_delay = 3;
-                // info!("SPRITE 0 DETECTED ON SCANLINE {}, SETTING DELAY TO {}", dot_scanline, self.sprite_0_hit_delay);
+                self.sprite_0_hit_delay = 2;
             }
+
 
             let index = dot_scanline as usize * crate::constants::WIDTH + dot_x as usize;
             let _ = self.delayed_pixels.push((index, final_color));
@@ -301,17 +403,16 @@ impl Ppu2 {
             }
         }
 
-        // Background shifters run only during visible fetch/render dots and tile prefetch dots.
-        // Shifting on every dot over-shifts data loaded at the end of a scanline and causes a
-        // left-edge black bar on the next scanline.
-        let bg_shift_active = background_rendering
+        // Background shifters run whenever rendering is enabled (either BG or sprites per
+        // AccuracyCoin "Rendering Flag Behavior") during visible fetch/render dots and tile prefetch dots.
+        let bg_shift_active = rendering_enabled_now
             && (dot_scanline < 240 || dot_scanline == 261)
             && ((1..=256).contains(&dot_x) || (321..337).contains(&dot_x));
         if bg_shift_active {
             self.attr_shift_low <<= 1;
             self.attr_shift_high <<= 1;
             self.pattern_shift_low <<= 1;
-            self.pattern_shift_high <<= 1;
+            self.pattern_shift_high = (self.pattern_shift_high << 1) | 1;
         }
 
         // Only update scrolling v/t state while rendering is enabled on
@@ -343,40 +444,32 @@ impl Ppu2 {
             self.pt_msb = self.get_vram(tile_addr + fine_y + 8, &mut memory.mapper);
         }
         if (event & BG_MSBITS) != 0 {
-            // Already calculated at BG_LSBITS
+            if rendering_enabled_now {
+                self.fetched_bg_tile = true;
+            }
         }
         // Only update scrolling v/t state while rendering is enabled on
         if can_update_scroll_v {
             if (event & INC_HORIZ_V) != 0 {
-                // Visible-scanline INC: load new tile data into the shift registers.
-                // At the moment INC fires (after emit+shift for this dot), bit 8 of the
-                // register is 0 (the previous tile's bit 7 was just emitted and shifted out
-                // of the u16). Placing the new byte at bits 8-1 (via << 1) fills that gap,
-                // so after exactly 7 more shifts the new byte is cleanly in bits 15-8 and
-                // will be output MSB-first starting at the correct column.
-                // Clear low 9 bits (8..0) before inserting bits 8..1 from the next tile.
-                // Keeping bit 8 stale creates a 1-pixel seam at tile boundaries.
-                self.pattern_shift_low  = (self.pattern_shift_low  & 0xFE00) | ((self.pt_lsb as u16) << 1);
-                self.pattern_shift_high = (self.pattern_shift_high & 0xFE00) | ((self.pt_msb as u16) << 1);
+                if self.fetched_bg_tile {
+                    self.fetched_bg_tile = false;
+                    self.pattern_shift_low  = (self.pattern_shift_low  & 0xFE00) | ((self.pt_lsb as u16) << 1);
+                    self.pattern_shift_high = (self.pattern_shift_high & 0xFE00) | ((self.pt_msb as u16) << 1) | 1;
 
-                // Attribute latch expands to 8 replicated bits for the upcoming tile.
-                self.attr_shift_low  = (self.attr_shift_low  & 0xFF00)
-                    | if (self.palette & 1) != 0 { 0x00FF } else { 0x0000 };
-                self.attr_shift_high = (self.attr_shift_high & 0xFF00)
-                    | if (self.palette & 2) != 0 { 0x00FF } else { 0x0000 };
+                    self.attr_shift_low  = (self.attr_shift_low  & 0xFF00)
+                        | if (self.palette & 1) != 0 { 0x00FF } else { 0x0000 };
+                    self.attr_shift_high = (self.attr_shift_high & 0xFF00)
+                        | if (self.palette & 2) != 0 { 0x00FF } else { 0x0000 };
+                }
 
                 // NES coarse-X increment semantics (not raw v+1): wrap 31->0 and switch H nametable.
-                if memory.ir.coarse_x() == 31 {
-                    memory.ir.set_coarse_x(0);
-                    memory.ir.switch_horizontal_nametable();
-                } else {
-                    memory.ir.increment_coarse_x();
-                }
+                memory.ir.increment_horiz_v();
             }
             if (event & INC_VERT_V) != 0 {
                 memory.ir.increment_vert_v();
             }
             if (event & HORI_V_EQUALS_HORI_T) != 0 {
+                self.old_v = memory.ir.v;
                 memory.ir.hori_v_equals_hori_t()
             }
             if (event & VERT_V_EQUALS_VERT_T) != 0 {
@@ -387,8 +480,15 @@ impl Ppu2 {
         // Flags
         //
         if (event & SET_VBLANK_FLAG) != 0 {
-            memory.set_bit(0x2002, BIT_VBL);
-            result.vbl = true;
+            if self.vblank_suppressed {
+                self.vblank_suppressed = false;
+            } else {
+                memory.set_bit(0x2002, BIT_VBL);
+                if !self.nmi_suppressed {
+                    result.vbl = true;
+                }
+            }
+            self.nmi_suppressed = false;
             // End of frame, copy the newly generated frame to the frame buffer
             if self.last_screen_sent.elapsed().as_millis() > 16 {
                 *FRAME.write().unwrap() =
@@ -397,109 +497,390 @@ impl Ppu2 {
             }
         }
         if (event & CLEAR_FLAGS) != 0 {
+            self.sprite_overflow_delay = -1;
+            self.vbl_cleared_at_dot1 = (memory.get_direct(0x2002) & (1 << BIT_VBL)) != 0;
             memory.clear_bit(0x2002, BIT_VBL);
             memory.clear_bit(0x2002, BIT_SPRITE_0_HIT);
             memory.clear_bit(0x2002, BIT_SPRITE_OVERFLOW);
+        } else if dot_x > 2 {
+            self.vbl_cleared_at_dot1 = false;
         }
         //
         // Sprites
         //
-        if rendering_enabled && (event & SPRITE_EVALUATION) != 0 {
-            // Sprite evaluation runs from dot 65..256 (inclusive).
-            // One OAM entry is evaluated per pair of dots; dot 65 → OAM[0], dot 66 → OAM[1], …
-            let sprite_count = self.oam2_eval_index / 4;
-            let sprite_evaluated = (self.x as usize).wrapping_sub(65);
-            if sprite_evaluated < 64 {
-                let oam_index = sprite_evaluated * 4;
+        if rendering_enabled && (self.scanline < 240 || self.scanline == 261) && self.x == 65 {
+            self.oam2_has_sprite_zero = false;
+        }
+        if rendering_enabled && self.scanline < 240 && (self.x == 0 || self.x >= 321) {
+            self.oam_buffer = self.oam2[0];
+        }
+        if rendering_enabled && self.scanline < 240 && (event & SPRITE_EVALUATION) != 0 {
+            if self.x == 65 {
+                self.oam2_eval_index = 0;
+                self.eval_byte_index = 0;
+                self.eval_finished = false;
+                self.eval_overflow_count = 0;
+
+            }
+            if (self.x & 1) == 1 {
+                let mut s = self.oam[self.oam_address as usize];
+                if (self.oam_address & 0x03) == 2 {
+                    s &= 0xE3;
+                }
+                self.oam_buffer = s;
+            } else {
+                let s = self.oam_buffer;
+                let next_scanline = self.scanline + 1;
                 let sprite_height = memory.ppu_ctrl.sprite_height as u16;
-                // OAM stores Y-1; on-screen top Y is OAM Y + 1.
-                let sprite_y = self.oam[oam_index] as u16 + 1;
-                // Pre-render scanline (261) evaluates sprites for scanline 0.
-                let next_scanline = if self.scanline == 261 { 0u16 } else { self.scanline + 1 };
-                if sprite_y <= next_scanline
-                    && next_scanline < sprite_y + sprite_height
-                    && next_scanline < 240
-                {
-                    if sprite_count == 8 {
-                        info!(target: "ppu", "Sprite overflow");
+                let in_range = {
+                    let sprite_y = s as u16 + 1;
+                    sprite_y <= next_scanline && next_scanline < sprite_y + sprite_height
+                };
+                let n = (self.oam_address >> 2) & 0x3F;
+                let m = self.oam_address & 0x03;
+
+                if !self.eval_finished && self.oam2_eval_index < 32 {
+                    self.oam2[self.oam2_eval_index] = s;
+                    match self.eval_byte_index {
+                        0 => {
+                            if in_range {
+                                if self.x == 66 {
+                                    self.oam2_has_sprite_zero = true;
+                                }
+                                self.oam2_source_index[self.oam2_eval_index / 4] = self.oam_address;
+                                self.oam2_eval_index += 1;
+                                self.oam_address = self.oam_address.wrapping_add(1);
+                                self.eval_byte_index = 1;
+                            } else {
+                                let next_n = (n + 1) & 0x3F;
+                                self.oam_address = (self.oam_address.wrapping_add(4)) & 0xFC;
+                                if next_n == 0 {
+                                    self.eval_finished = true;
+                                }
+                                self.eval_byte_index = 0;
+                            }
+                        }
+                        1 | 2 => {
+                            self.oam2_eval_index += 1;
+                            self.oam_address = self.oam_address.wrapping_add(1);
+                            self.eval_byte_index += 1;
+                        }
+                        3 => {
+                            self.oam2_eval_index += 1;
+                            self.eval_byte_index = 0;
+                            self.oam_address = self.oam_address.wrapping_add(1);
+                            let next_n = (n + 1) & 0x3F;
+                            if next_n == 0 {
+                                self.eval_finished = true;
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                } else if self.eval_finished {
+                    self.oam_buffer = self.oam2[self.oam2_eval_index & 0x1F];
+                    self.oam_address = (self.oam_address.wrapping_add(4)) & 0xFC;
+                } else {
+                    // Secondary OAM is full (32 bytes / 8 sprites)
+                    self.oam_buffer = self.oam2[0];
+                    if self.eval_overflow_count > 0 {
+                        self.eval_overflow_count -= 1;
+                        if self.eval_overflow_count > 0 {
+                            self.oam_address = self.oam_address.wrapping_add(1);
+                        } else {
+                            if (self.oam_address & 0x03) == 3 {
+                                self.oam_address = self.oam_address.wrapping_add(1);
+                            }
+                            self.oam_address &= 0xFC;
+                            self.eval_finished = true;
+                        }
+                    } else if in_range {
                         memory.set_bit(0x2002, BIT_SPRITE_OVERFLOW);
+                        self.sprite_overflow_delay = -1;
+                        self.eval_overflow_count = 3;
+                        self.oam_address = self.oam_address.wrapping_add(1);
                     } else {
-                        // This sprite is visible on the next scanline, copy it to
-                        // secondary OAM
-                        self.oam2_source_index[sprite_count] = sprite_evaluated as u8;
-                        self.oam2[self.oam2_eval_index] = self.oam[oam_index];
-                        self.oam2[self.oam2_eval_index + 1] = self.oam[oam_index + 1];
-                        self.oam2[self.oam2_eval_index + 2] = self.oam[oam_index + 2];
-                        self.oam2[self.oam2_eval_index + 3] = self.oam[oam_index + 3];
-                        self.oam2_eval_index += 4;
+                        let next_n = (n + 1) & 0x3F;
+                        let next_m = (m + 1) & 0x03;
+                        self.oam_address = (next_n << 2) | next_m;
+                        if next_n == 0 {
+                            self.eval_finished = true;
+                        }
                     }
                 }
             }
         }
         if (event & END_SPRITE_EVALUATION) != 0 {
-            // End of sprite evaluation, sprite data for the next scanline is now available in oam2
-            // and can be used for rendering/fetching. Clear previous scanline latches now,
-            // then refill during sprite fetch events (261..320).
-            self.sprite_latches.clear();
             self.sprite_fetch_index = 0;
+            if rendering_enabled && (self.scanline < 240 || self.scanline == 261) {
+                self.render_has_sprite_zero = self.oam2_has_sprite_zero;
+            }
         }
-        if rendering_enabled && (event & SPRITE_LS_BITS) != 0 {
-             let sprite_count = self.oam2_eval_index / 4;
-             if self.sprite_fetch_index < sprite_count {
-                 let off = self.sprite_fetch_index * 4;
-                 // OAM stores Y-1; on-screen top Y is OAM Y + 1.
-                 let source_index = self.oam2_source_index[self.sprite_fetch_index];
-                 let sprite_y = self.oam2[off] as u16 + 1;
-                 let tile_index = self.oam2[off + 1] as u16;
-                 let attr = self.oam2[off + 2];
-                 let sprite_x = self.oam2[off + 3] as u16;
+        if rendering_enabled && (self.scanline < 240 || self.scanline == 261) && self.x >= 257 && self.x <= 320 {
+            self.oam_address = 0;
+            if self.scanline < 240 {
+                let slot = ((self.x - 257) / 8) as usize;
+                let sub = ((self.x - 257) % 8) as usize;
+                self.oam_buffer = self.oam2[slot * 4 + sub.min(3)];
+            }
+        }
+        if rendering_enabled && (self.scanline < 240 || self.scanline == 261) && (event & SPRITE_LS_BITS) != 0 {
+            let slot = ((self.x - 261) / 8) as usize;
+            if slot < 8 {
+                if slot == 0 {
+                    self.sprite_latches.truncate(8);
+                }
+                if self.sprite_latches.len() < 8 {
+                    self.sprite_latches.resize(8, SpriteLatch {
+                        source_index: 0xFF,
+                        is_sprite_0: false,
+                        attr: 0xFF,
+                        x: 0xFF,
+                        low: 0,
+                        high: 0,
+                    });
+                }
+                let off = slot * 4;
+                let source_index = self.oam2_source_index[slot];
+                let is_sprite_0 = slot == 0 && self.render_has_sprite_zero;
+                let raw_y = self.oam2[off] as u16;
+                let tile_index = self.oam2[off + 1] as u16;
+                let attr = self.oam2[off + 2];
+                let sprite_x = self.oam2[off + 3] as u16;
 
-                 // On the pre-render scanline (261) we're fetching tiles for scanline 0,
-                 // not scanline 262. Guard against that wrap explicitly.
-                 let next_scanline = if self.scanline == 261 { 0u16 } else { self.scanline + 1 };
-                 let sprite_height = memory.ppu_ctrl.sprite_height as u16;
-                 if sprite_y <= next_scanline && next_scanline < sprite_y + sprite_height && next_scanline < 240 {
-                     let mut y_in_sprite = next_scanline - sprite_y;
-                     let v_flip = (attr & 0x80) != 0;
+                let eval_line = self.scanline & 0xFF;
+                let sprite_height = memory.ppu_ctrl.sprite_height as u16;
+                let (low, high) = if raw_y <= eval_line && eval_line < raw_y + sprite_height {
+                    let mut y_in_sprite = eval_line - raw_y;
+                    let v_flip = (attr & 0x80) != 0;
 
-                     let (pattern_base, effective_tile, fine_y) = if sprite_height == 16 {
-                         // 8x16 mode: bit 0 of tile index selects pattern table; top/bottom tile
-                         // is selected by y_in_sprite, with vertical flip swapping halves.
-                         let base_tile = tile_index & 0xFE;
-                         let mut y_in_tile = y_in_sprite;
-                         let tile = if y_in_tile < 8 {
-                             if v_flip { base_tile + 1 } else { base_tile }
-                         } else {
-                             y_in_tile -= 8;
-                             if v_flip { base_tile } else { base_tile + 1 }
-                         };
-                         if v_flip {
-                             y_in_tile = 7 - y_in_tile;
-                         }
-                         let table = if (tile_index & 1) == 0 { 0usize } else { 0x1000usize };
-                         (table, tile, y_in_tile as usize)
-                     } else {
-                         if v_flip {
-                             y_in_sprite = 7 - y_in_sprite;
-                         }
-                         (memory.ppu_ctrl.sprite_table as usize, tile_index, y_in_sprite as usize)
-                     };
+                    let (pattern_base, effective_tile, fine_y) = if sprite_height == 16 {
+                        let base_tile = tile_index & 0xFE;
+                        let mut y_in_tile = y_in_sprite;
+                        let tile = if y_in_tile < 8 {
+                            if v_flip { base_tile + 1 } else { base_tile }
+                        } else {
+                            y_in_tile -= 8;
+                            if v_flip { base_tile } else { base_tile + 1 }
+                        };
+                        if v_flip {
+                            y_in_tile = 7 - y_in_tile;
+                        }
+                        let table = if (tile_index & 1) == 0 { 0usize } else { 0x1000usize };
+                        (table, tile, y_in_tile as usize)
+                    } else {
+                        if v_flip {
+                            y_in_sprite = 7 - y_in_sprite;
+                        }
+                        (memory.ppu_ctrl.sprite_table as usize, tile_index, y_in_sprite as usize)
+                    };
 
-                     let tile_offset = pattern_base + effective_tile as usize * 16 + fine_y;
-                     self.sprite_latches.push(SpriteLatch {
-                         source_index,
-                         attr,
-                         x: sprite_x,
-                         low: self.get_vram(tile_offset, &mut memory.mapper),
-                         high: self.get_vram(tile_offset + 8, &mut memory.mapper),
-                     });
-                 }
+                    let tile_offset = pattern_base + effective_tile as usize * 16 + fine_y;
+                    (
+                        self.get_vram(tile_offset, &mut memory.mapper),
+                        self.get_vram(tile_offset + 8, &mut memory.mapper),
+                    )
+                } else {
+                    (0, 0)
+                };
 
-                 self.sprite_fetch_index += 1;
-             }
-         }
+                self.sprite_latches[slot] = SpriteLatch {
+                    source_index,
+                    is_sprite_0,
+                    attr,
+                    x: sprite_x,
+                    low,
+                    high,
+                };
+                self.sprite_counting[slot] = false;
+                if slot == 7 {
+                    self.sprite_latches.truncate(8);
+                    if self.scanline < 240 && self.oam2_eval_index == 32 {
+                        let start_n = (self.oam2_source_index[7] as usize / 4) + 1;
+                        for n in start_n..64 {
+                            let oam_off = n * 4;
+                            let extra_y = self.oam[oam_off] as u16;
+                            if extra_y <= eval_line && eval_line < extra_y + sprite_height {
+                                let extra_tile = self.oam[oam_off + 1] as u16;
+                                let extra_attr = self.oam[oam_off + 2] & 0xE3;
+                                let extra_x = self.oam[oam_off + 3] as u16;
+                                let mut y_in_sprite = eval_line - extra_y;
+                                let v_flip = (extra_attr & 0x80) != 0;
+                                let (pattern_base, effective_tile, fine_y) = if sprite_height == 16 {
+                                    let base_tile = extra_tile & 0xFE;
+                                    let mut y_in_tile = y_in_sprite;
+                                    let tile = if y_in_tile < 8 {
+                                        if v_flip { base_tile + 1 } else { base_tile }
+                                    } else {
+                                        y_in_tile -= 8;
+                                        if v_flip { base_tile } else { base_tile + 1 }
+                                    };
+                                    if v_flip {
+                                        y_in_tile = 7 - y_in_tile;
+                                    }
+                                    let table = if (extra_tile & 1) == 0 { 0usize } else { 0x1000usize };
+                                    (table, tile, y_in_tile as usize)
+                                } else {
+                                    if v_flip {
+                                        y_in_sprite = 7 - y_in_sprite;
+                                    }
+                                    (memory.ppu_ctrl.sprite_table as usize, extra_tile, y_in_sprite as usize)
+                                };
+                                let tile_offset = pattern_base + effective_tile as usize * 16 + fine_y;
+                                let extra_low = self.get_vram(tile_offset, &mut memory.mapper);
+                                let extra_high = self.get_vram(tile_offset + 8, &mut memory.mapper);
+                                let idx = self.sprite_latches.len();
+                                if idx < 64 {
+                                    self.sprite_latches.push(SpriteLatch {
+                                        source_index: oam_off as u8,
+                                        is_sprite_0: false,
+                                        attr: extra_attr,
+                                        x: extra_x,
+                                        low: extra_low,
+                                        high: extra_high,
+                                    });
+                                    self.sprite_counting[idx] = false;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                self.sprite_fetch_index = slot + 1;
+            }
+        }
         if (event & SPRITE_MS_BITS) != 0 {}
-        if (event & SECONDARY_OAM_CLEAR) != 0 {
+        if self.pending_2007_read_delay > 0 {
+            self.pending_2007_read_delay -= 1;
+            if self.pending_2007_read_delay == 0 {
+                let is_rendering = can_update_scroll_v;
+                if is_rendering {
+                    let fetch_byte = match dot_x {
+                        1..=256 => {
+                            let phase = (dot_x - 1) & 7;
+                            match phase {
+                                0 | 1 => self.tile_index,
+                                2 | 3 => {
+                                    let v = memory.ir.v as usize;
+                                    let address = 0x23C0
+                                        | (v & 0x0C00)
+                                        | ((v >> 4) & 0x38)
+                                        | ((v >> 2) & 0x07);
+                                    self.get_vram(address, &mut memory.mapper)
+                                }
+                                4 | 5 => self.pt_lsb,
+                                6 | 7 => self.pt_msb,
+                                _ => unreachable!(),
+                            }
+                        }
+                        257..=320 => {
+                            let slot = ((dot_x - 257) / 8) as usize;
+                            let sub = (dot_x - 257) & 7;
+                            match sub {
+                                0 | 1 => {
+                                    if dot_x <= 258 {
+                                        let nt_addr = 0x2000 | (self.old_v as usize & 0x0FFF);
+                                        self.get_vram(nt_addr, &mut memory.mapper)
+                                    } else {
+                                        let nt_addr = 0x2000 | (memory.ir.v as usize & 0x0FFF);
+                                        self.get_vram(nt_addr, &mut memory.mapper)
+                                    }
+                                }
+                                2 | 3 => {
+                                    let nt_addr = 0x2000 | (memory.ir.v as usize & 0x0FFF);
+                                    self.get_vram(nt_addr, &mut memory.mapper)
+                                }
+                                4..=7 => {
+                                    let off = slot * 4;
+                                    let raw_y = self.oam2[off] as u16;
+                                    let tile_index = self.oam2[off + 1] as u16;
+                                    let attr = self.oam2[off + 2];
+                                    let eval_line = dot_scanline & 0xFF;
+                                    let sprite_height = memory.ppu_ctrl.sprite_height as u16;
+                                    let mut y_in_sprite = eval_line.wrapping_sub(raw_y) & 0x0F;
+                                    let v_flip = (attr & 0x80) != 0;
+                                    let (pattern_base, effective_tile, fine_y) = if sprite_height == 16 {
+                                        let base_tile = tile_index & 0xFE;
+                                        let mut y_in_tile = y_in_sprite;
+                                        let tile = if y_in_tile < 8 {
+                                            if v_flip { base_tile + 1 } else { base_tile }
+                                        } else {
+                                            y_in_tile -= 8;
+                                            if v_flip { base_tile } else { base_tile + 1 }
+                                        };
+                                        if v_flip {
+                                            y_in_tile = 7 - y_in_tile;
+                                        }
+                                        let table = if (tile_index & 1) == 0 { 0usize } else { 0x1000usize };
+                                        (table, tile, y_in_tile as usize)
+                                    } else {
+                                        y_in_sprite &= 0x07;
+                                        if v_flip {
+                                            y_in_sprite = 7 - y_in_sprite;
+                                        }
+                                        (memory.ppu_ctrl.sprite_table as usize, tile_index, y_in_sprite as usize)
+                                    };
+                                    let tile_offset = pattern_base + effective_tile as usize * 16 + fine_y;
+                                    if sub <= 5 {
+                                        self.get_vram(tile_offset, &mut memory.mapper)
+                                    } else {
+                                        self.get_vram(tile_offset + 8, &mut memory.mapper)
+                                    }
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        321..=336 => {
+                            let sub = (dot_x - 321) & 7;
+                            match sub {
+                                0 | 1 => {
+                                    let nt_addr = 0x2000 | (memory.ir.v as usize & 0x0FFF);
+                                    self.get_vram(nt_addr, &mut memory.mapper)
+                                }
+                                2 | 3 => {
+                                    let v = memory.ir.v as usize;
+                                    let address = 0x23C0
+                                        | (v & 0x0C00)
+                                        | ((v >> 4) & 0x38)
+                                        | ((v >> 2) & 0x07);
+                                    self.get_vram(address, &mut memory.mapper)
+                                }
+                                4 | 5 => {
+                                    let nt_addr = 0x2000 | (memory.ir.v as usize & 0x0FFF);
+                                    let tile = self.get_vram(nt_addr, &mut memory.mapper);
+                                    let fine_y = (memory.ir.v as usize >> 12) & 7;
+                                    let pattern_base = memory.ppu_ctrl.background_table as usize;
+                                    self.get_vram(pattern_base + tile as usize * 16 + fine_y, &mut memory.mapper)
+                                }
+                                6 | 7 => {
+                                    let nt_addr = 0x2000 | (memory.ir.v as usize & 0x0FFF);
+                                    let tile = self.get_vram(nt_addr, &mut memory.mapper);
+                                    let fine_y = (memory.ir.v as usize >> 12) & 7;
+                                    let pattern_base = memory.ppu_ctrl.background_table as usize;
+                                    self.get_vram(pattern_base + tile as usize * 16 + fine_y + 8, &mut memory.mapper)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        337..=340 | 0 => {
+                            let nt_addr = 0x2000 | (memory.ir.v as usize & 0x0FFF);
+                            self.get_vram(nt_addr, &mut memory.mapper)
+                        }
+                        _ => 0,
+                    };
+                    memory.internal_buffer = fetch_byte;
+                    memory.ir.increment_horiz_v();
+                    memory.ir.increment_vert_v();
+                } else {
+                    let a = memory.ir.v as usize & 0x3fff;
+                    let is_palette = (a & 0x3f00) == 0x3f00;
+                    let vram_addr = if is_palette { 0x2f00 + (a & 0xff) } else { a };
+                    memory.internal_buffer = self.get_vram(vram_addr, &mut memory.mapper);
+                    memory.ir.increment_v(memory.ppu_ctrl.vram_increment);
+                }
+            }
+        }
+        if rendering_enabled && self.scanline < 240 && (event & SECONDARY_OAM_CLEAR) != 0 {
+            self.oam_buffer = 0xff;
             if self.oam2_clear_index < self.oam2.len() {
                 self.oam2[self.oam2_clear_index] = 0xff;
                 self.oam2_clear_index += 1;
@@ -544,11 +925,7 @@ impl Ppu2 {
         }
 
         // Row 241 (just set VBL)
-        // Fire VBL at dot 0 (one dot before hardware's dot 1).
-        // 241*341 = 82181, and 82181 % 3 == 2 (last PPU tick of a CPU-cycle batch),
-        // so the NMI reaches the CPU one cycle earlier than dot 1 — necessary for
-        // Branch Basics timing test to pass
-        result[241 * WIDTH + 0] = SET_VBLANK_FLAG;
+        result[241 * WIDTH + 1] = SET_VBLANK_FLAG;
 
         // Row 261 (pre render line)
         let y = 261;
@@ -602,7 +979,7 @@ impl Ppu2 {
             result[y * WIDTH + x] |= SPRITE_EVALUATION;
         }
         for y in 0..262 {
-            result[y * WIDTH + 260] = END_SPRITE_EVALUATION;
+            result[y * WIDTH + 260] |= END_SPRITE_EVALUATION;
             // Hardware uses dots 257-320 (64 dots) to fetch up to 8 sprites (8 dots each).
             // step_by(8) gives exactly 8 fetch slots: 261, 269, 277, 285, 293, 301, 309, 317.
             // step_by(16) would only produce 4 slots and silently drop sprites 4-7.
@@ -620,6 +997,22 @@ impl Ppu2 {
 
     pub fn set_open_bus(&mut self, value: u8) {
         self.open_bus = value;
+        // PPU open bus decays to 0 after ~600ms (~1,000,000 PPU dots).
+        // AccuracyCoin test 5 waits ~120 frames (2 seconds, ~10,700,000 PPU dots).
+        self.open_bus_decay_cycles = 1_000_000;
+    }
+
+    pub(crate) fn get_oam_memory(&self) -> Vec<u8> {
+        Vec::from(self.oam.clone())
+    }
+
+    pub(crate) fn get_video_memory(&self) -> Vec<u8> {
+        let mut memory = Vec::with_capacity(VRAM_SIZE);
+        let mut mapper = MapperBase::default();
+        for i in 0..VRAM_SIZE {
+            memory.push(self.get_vram(i, &mut mapper))
+        }
+        memory
     }
 
     pub fn get_vram(&self, address: usize, mapper: &mut MapperBase) -> u8 {
@@ -656,10 +1049,19 @@ impl Ppu2 {
         self.oam[address as usize] = value;
     }
 
-    pub fn update_beam(&mut self, _rendering_enabled: bool) {
-        self.event_index += 1;
-        if self.event_index >= self.events.len() {
+    pub fn update_beam(&mut self, rendering_enabled: bool) {
+        let dot_x = (self.event_index % WIDTH) as u16;
+        let dot_scanline = (self.event_index / WIDTH) as u16;
+
+        if dot_scanline == 261 && dot_x == 339 && self.is_odd_frame && rendering_enabled {
             self.event_index = 0;
+            self.is_odd_frame = !self.is_odd_frame;
+        } else {
+            self.event_index += 1;
+            if self.event_index >= self.events.len() {
+                self.event_index = 0;
+                self.is_odd_frame = !self.is_odd_frame;
+            }
         }
 
         self.x = (self.event_index % WIDTH) as u16;
@@ -677,9 +1079,10 @@ impl Ppu2 {
 /// Each sprite stored in oam2 gets its information extracted into this structure
 /// during the SPRITE_LS_BITS event.
 #[derive(Debug, Clone, Copy)]
-struct SpriteLatch {
+pub(crate) struct SpriteLatch {
     /// Primary OAM sprite index (0..63) this latch originated from.
     source_index: u8,
+    is_sprite_0: bool,
     attr: u8,
     /// Stores sprite X for pixel alignment (kept as `y` to minimize churn).
     x: u16,

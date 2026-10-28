@@ -2,7 +2,7 @@ mod envelope;
 mod pulse;
 mod triangle;
 mod noise;
-mod dmc;
+pub mod dmc;
 mod apu_rodio;
 
 use self::noise::Noise;
@@ -44,10 +44,23 @@ pub struct Apu {
 
     // frame counter
     frame_counter_mode: FrameCounterMode,
+    /// Sequencer position in CPU cycles (Mesen/AccuracyCoin step table).
     frame_counter: u32,
+    /// Current step index into the 4/5-step sequence (0..5).
+    frame_step: u8,
+    /// After $4017 write: remaining CPU cycles before reset takes effect (0 = idle).
+    frame_reset_delay: u8,
+    /// Pending $4017 value while delay is counting (-1 = none), as i16.
+    frame_new_value: i16,
+    /// Block frame ticks for N cycles after a tick (Mesen `_blockFrameCounterTick`).
+    block_frame_tick: u8,
     irq_enabled: bool,
     irq_enabled_needs_to_be_cleared: bool,
     frame_counter_irq: bool,
+    /// Physical IRQ level signal driven to the CPU
+    frame_irq_line: bool,
+    /// $4015 read schedules clear of frame IRQ on the next CPU get cycle.
+    frame_irq_clear_pending: bool,
     cycle_count: u64,
 
     gui_sound_enabled: bool,
@@ -77,10 +90,16 @@ impl Apu {
 
             frame_counter_mode: Step4,
             frame_counter: 0,
+            frame_step: 0,
+            frame_reset_delay: 0,
+            frame_new_value: -1,
+            block_frame_tick: 0,
             cycle_count: 0,
             irq_enabled: true,
             irq_enabled_needs_to_be_cleared: false,
             frame_counter_irq: false,
+            frame_irq_line: false,
+            frame_irq_clear_pending: false,
 
             gui_sound_enabled: true,
             gui_pulse1_enabled: true,
@@ -108,59 +127,88 @@ impl Apu {
         }
     }
 
+    fn clock_quarter_frame(&mut self) {
+        self.pulse1.clock_envelope();
+        self.pulse2.clock_envelope();
+        self.noise.clock_envelope();
+        self.triangle.clock_linear_counter();
+    }
+
+    fn clock_half_frame(&mut self) {
+        self.clock_length_counters();
+        self.pulse1.clock_sweep(true);
+        self.pulse2.clock_sweep(false);
+    }
+
+    /// NTSC step cycle table (Mesen / AccuracyCoin).
+    const STEP_CYCLES_4: [u32; 6] = [7457, 14913, 22371, 29828, 29829, 29830];
+    const STEP_CYCLES_5: [u32; 6] = [7457, 14913, 22371, 29829, 37281, 37282];
+
+    /// Clock the frame sequencer once per CPU cycle (counter is in CPU cycles).
     fn clock_frame_counter(&mut self) {
-        self.frame_counter += 1;
+        self.frame_counter = self.frame_counter.wrapping_add(1);
 
-        let mut clock_env = false;
-        let mut clock_len = false;
-
-        if matches!(self.frame_counter_mode, Step4) {
-            // 4-step mode (60 Hz)
-            if self.frame_counter == 3729 {
-                clock_env = true;
-            } else if self.frame_counter == 7457 {
-                clock_env = true;
-                clock_len = true;
-            } else if self.frame_counter == 11186 {
-                clock_env = true;
-            } else if self.frame_counter == 14915 {
-                clock_env = true;
-                clock_len = true;
-                self.frame_counter = 0;
-                if self.irq_enabled {
-                    self.frame_counter_irq = true;
-                }
-            }
+        let steps = if matches!(self.frame_counter_mode, Step4) {
+            &Self::STEP_CYCLES_4
         } else {
-            // 5-step mode (48 Hz / 192 Hz)
-            self.set_irq_enabled(false);
-            if self.frame_counter == 3729 {
-                clock_env = true;
-            } else if self.frame_counter == 7457 {
-                clock_env = true;
-                clock_len = true;
-            } else if self.frame_counter == 11186 {
-                clock_env = true;
-            } else if self.frame_counter == 14915 {
-                // Step 4: nothing
-            } else if self.frame_counter == 18641 {
-                clock_env = true;
-                clock_len = true;
-                self.frame_counter = 0;
+            &Self::STEP_CYCLES_5
+        };
+        let step = self.frame_step as usize;
+        if step >= 6 || self.frame_counter < steps[step] {
+            return;
+        }
+
+        // IRQ flag on last 3 steps of 4-step mode (Mesen / AccuracyCoin).
+        // Even with interrupt inhibit set, the flag is forced set on steps 3–4
+        // (cycles 29828–29829) and only follows inhibit on step 5 (29830).
+        // Setting the flag cancels a pending $4015 clear so a re-set on these
+        // cycles is visible to a following read (tests E–G).
+        //
+        // However, the external IRQ level detector wire is only asserted if
+        // irq_enabled is true, and on step >= 4 (cycle 29829 or 29830).
+        if matches!(self.frame_counter_mode, Step4) && step >= 3 {
+            if self.irq_enabled {
+                self.frame_counter_irq = true;
+                if step >= 4 {
+                    self.frame_irq_line = true;
+                }
+                self.frame_irq_clear_pending = false;
+            } else if step < 5 {
+                // Inhibit: still set flag for two cycles (tests I–K).
+                self.frame_counter_irq = true;
+                self.frame_irq_clear_pending = false;
+            } else {
+                // Step 5 with inhibit: flag cleared (test L).
+                self.frame_counter_irq = false;
+                self.frame_irq_line = false;
+                self.frame_irq_clear_pending = false;
             }
         }
 
-        if clock_env {
-            self.pulse1.clock_envelope();
-            self.pulse2.clock_envelope();
-            self.noise.clock_envelope();
-            self.triangle.clock_linear_counter();
+        // Frame type for this step: Q, H, Q, —, H, —
+        let (do_q, do_h) = match step {
+            0 => (true, false),
+            1 => (true, true),
+            2 => (true, false),
+            3 => (false, false),
+            4 => (true, true),
+            _ => (false, false),
+        };
+
+        if (do_q || do_h) && self.block_frame_tick == 0 {
+            if do_q {
+                self.clock_quarter_frame();
+            }
+            if do_h {
+                self.clock_half_frame();
+            }
+            self.block_frame_tick = 2;
         }
 
-        if clock_len {
-            self.clock_length_counters();
-            self.pulse1.clock_sweep(true);
-            self.pulse2.clock_sweep(false);
+        self.frame_step += 1;
+        if self.frame_step >= 6 {
+            self.frame_step = 0;
+            self.frame_counter = 0;
         }
     }
 
@@ -169,29 +217,73 @@ impl Apu {
         self.is_get_phase = phase;
     }
 
+    pub fn is_get_phase(&self) -> bool {
+        self.is_get_phase
+    }
+
+    /// Apply a pending $4015 frame-IRQ clear (next get edge after a status read).
+    /// Also used between OAM DMA sprite fetches so multi-read tables see the
+    /// delayed clear without double-clocking the full APU.
+    pub fn tick_frame_irq_clear(&mut self) {
+        if self.frame_irq_clear_pending {
+            self.frame_counter_irq = false;
+            self.frame_irq_line = false;
+            self.frame_irq_clear_pending = false;
+        }
+    }
+
     /// Return true if IRQ
     pub fn step(&mut self, memory: &mut NesMemory, is_get_phase: bool) -> bool {
-        self.is_get_phase = is_get_phase;
         debug!(target: "asm", "{}", if is_get_phase { "GET" } else { "PUT" });
-        if self.is_get_phase && self.irq_enabled_needs_to_be_cleared
-        {
-            self.irq_enabled_needs_to_be_cleared = false;
-            self.irq_enabled = false;
-            debug!(target: "asm", "Cleared irq_enabled in ste()");
-        }
+        let _ = self.irq_enabled_needs_to_be_cleared;
         self.cycle_count += 1;
 
-        // frame counter runs every cycle
-        // self.clock_frame_counter();
+        // Frame IRQ clear runs at the start of a CPU get cycle after $4015 read
+        // (AccuracyCoin tests 6–7: clear is delayed to the next get edge).
+        if is_get_phase {
+            self.tick_frame_irq_clear();
+        }
+        self.is_get_phase = is_get_phase;
+
+        // Apply pending $4017 write after delay (Mesen).
+        let mut just_applied_4017 = false;
+        if self.frame_new_value >= 0 {
+            self.frame_reset_delay = self.frame_reset_delay.saturating_sub(1);
+            if self.frame_reset_delay == 0 {
+                let val = self.frame_new_value as u8;
+                self.frame_new_value = -1;
+                self.frame_counter_mode = if (val & 0x80) == 0 { Step4 } else { Step5 };
+                self.frame_step = 0;
+                self.frame_counter = 0;
+                just_applied_4017 = true;
+                // Note: switching to 5-step does NOT clear an already-set frame IRQ
+                // flag (AccuracyCoin Frame Counter IRQ test 8).
+                if matches!(self.frame_counter_mode, Step5) && self.block_frame_tick == 0 {
+                    // Immediate half-frame clock on 5-step write.
+                    self.clock_quarter_frame();
+                    self.clock_half_frame();
+                    self.block_frame_tick = 2;
+                }
+            }
+        }
+        if self.block_frame_tick > 0 {
+            self.block_frame_tick -= 1;
+        }
 
         // triangle timer clocks every CPU cycle
         self.triangle.step();
-        // The DMC will actually not always step, depends on its rate
+        // Delayed $4015 D4 clear (explicit DMA abort window).
+        self.dmc.tick_disable_delay();
+        // DMC timer/output unit (sample fetches are handled separately via DMA).
         let result = self.dmc.step(memory);
 
-        // pulse and noise timers clock every other CPU cycle (APU cycle)
-        if self.cycle_count % 2 == 0 {
+        // Frame sequencer advances every CPU cycle. Skip the apply cycle so
+        // counter stays 0 (Mesen previousCycle=0) and half-frame lands at 14913.
+        if !just_applied_4017 {
             self.clock_frame_counter();
+        }
+        // Pulse and noise timers clock every other CPU cycle (APU cycle).
+        if self.cycle_count % 2 == 0 {
             self.pulse1.clock_timer();
             self.pulse2.clock_timer();
             self.noise.clock_timer();
@@ -207,7 +299,40 @@ impl Apu {
             }
         }
 
-        result || (self.frame_counter_irq && self.irq_enabled)
+        result || self.frame_irq_line
+    }
+
+    /// Advance one cycle of DMC DMA if needed. Returns true if the CPU is stalled.
+    pub fn dmc_dma_tick(
+        &mut self,
+        memory: &mut NesMemory,
+        dummy_read_address: Option<u16>,
+        is_get: bool,
+        is_write: bool,
+    ) -> bool {
+        self.dmc.dma_tick(memory, dummy_read_address, is_get, is_write)
+    }
+
+    pub fn dmc_dma_active(&self) -> bool {
+        self.dmc.dma_active()
+    }
+
+    pub fn dmc_dma_pending(&self) -> bool {
+        self.dmc.dma_pending()
+    }
+
+    pub fn dmc_tick_load_delay(&mut self) {
+        self.dmc.tick_load_delay()
+    }
+
+    /// Advance DMC DMA state only (no memory I/O). Used by the emulator to avoid
+    /// re-entrant APU locks when dummy-reading $4015.
+    pub fn dmc_take_cycle(&mut self, is_get: bool, is_write: bool) -> dmc::DmaCycle {
+        self.dmc.dma_cycle(is_get, is_write)
+    }
+
+    pub fn dmc_finish_fetch(&mut self, byte: u8) {
+        self.dmc.finish_sample_fetch(byte);
     }
 
     pub fn audio_queue_depth(&self) -> usize {
@@ -274,34 +399,24 @@ impl Apu {
                 self.pulse2.set_enabled((val & 0x02) != 0);
                 self.triangle.set_enabled((val & 0x04) != 0);
                 self.noise.set_enabled((val & 0x08) != 0);
-                self.dmc.set_enabled((val & 0x10) != 0);
+                // Cycle parity for explicit-stop disable delay (even→2, odd→3).
+                let cycle_odd = (self.cycle_count & 1) != 0;
+                self.dmc.set_enabled((val & 0x10) != 0, cycle_odd);
             }
 
             // Frame counter
             0x4017 => {
-                self.frame_counter_mode = if (val & 0x80) == 0 { Step4 } else { Step5 };
-                // info!("SET FRAME COUNTER MODE TO {:#?}", self.frame_counter_mode);
-                self.set_irq_enabled((val & 0x40) == 0);
-                if ! self.irq_enabled {
-                    // info!(target: "asm", "Write 4017={:02X}, disabling frame_counter_irq", val);
+                // Bit 6 = interrupt inhibit.
+                self.irq_enabled = (val & 0x40) == 0;
+                if (val & 0x40) != 0 {
                     self.frame_counter_irq = false;
+                    self.frame_irq_line = false;
+                    self.frame_irq_clear_pending = false;
                 }
-                // Should actually wait for 3-4 CPU cycles before setting to 0
-                // https://www.nesdev.org/wiki/APU_Frame_Counter
-                self.frame_counter = 0;
-
-                // If Step5, the units are clocked immediately.
-                // In Step4, it just resets the counter (clocks happen at next steps).
-                if matches!(self.frame_counter_mode, Step5) {
-                    self.pulse1.clock_envelope();
-                    self.pulse2.clock_envelope();
-                    self.noise.clock_envelope();
-                    self.triangle.clock_linear_counter();
-
-                    self.clock_length_counters();
-                    self.pulse1.clock_sweep(true);
-                    self.pulse2.clock_sweep(false);
-                }
+                // Mode/reset applied after 3–4 CPU cycles (Mesen / NESdev).
+                // Put-cycle write → 3; get-cycle write → 4.
+                self.frame_new_value = val as i16;
+                self.frame_reset_delay = if self.is_get_phase { 4 } else { 3 };
             }
             _ => {}
         }
@@ -312,29 +427,22 @@ impl Apu {
 
         match addr {
             0x4015 => {
-                // $4015 read	IF-D NT21
-                // 	DMC interrupt (I), frame interrupt (F), DMC active (D), length counter > 0 (N/T/2/1)
+                // $4015 read: IF-D NT21
+                // DMC interrupt (I), frame interrupt (F), DMC active (D), length counters
                 if self.pulse1.length_counter > 0 { result |= 0x01; }
                 if self.pulse2.length_counter > 0 { result |= 0x02; }
                 if self.triangle.length_counter > 0 { result |= 0x04; }
                 if self.noise.length_counter > 0 { result |= 0x08; }
                 if self.dmc.is_active() { result |= 0x10; }
-                if self.frame_counter_irq & self.irq_enabled { result |= 0x40; }
-                // info!("RETURNING [$4015]={result:02X} irq_enabled:{}", self.irq_enabled);
+                // Frame interrupt flag is visible whenever set (inhibit from $4017
+                // prevents it from being *set*, but a set flag still reads as 1).
+                if self.frame_counter_irq { result |= 0x40; }
+                if self.dmc.irq_flag { result |= 0x80; }
 
-                if ! self.is_get_phase || (self.is_get_phase && !self.irq_enabled_needs_to_be_cleared){
-                    // Weird case, clear the flag later
-                    debug!(target: "asm", "irq_enabled will be cleared later");
-                    self.irq_enabled_needs_to_be_cleared = true;
-                } else if matches!(self.frame_counter_mode, Step4) {
-                    // Normal case, clear immediately
-                    // info!("  CLEARING NOW, PHASE:{}", self.is_get_phase);
-                    self.set_irq_enabled(false);
-                    self.frame_counter_irq = false;
-                    self.irq_enabled_needs_to_be_cleared = false;
-                }
-
-                if self.dmc.irq_flag && self.irq_enabled { result |= 0x80; }
+                // Schedule clear on the next CPU get cycle (not immediate).
+                // AccuracyCoin Frame Counter IRQ tests 6–7.
+                self.frame_irq_clear_pending = true;
+                self.irq_enabled_needs_to_be_cleared = false;
             }
             _ => {
                 // Write only registers return open bus value
@@ -372,10 +480,15 @@ impl Apu {
         // Reset frame counter
         self.frame_counter_mode = Step4;
         self.frame_counter = 0;
+        self.frame_step = 0;
+        self.frame_reset_delay = 0;
+        self.frame_new_value = -1;
+        self.block_frame_tick = 0;
         self.cycle_count = 0;
         self.irq_enabled = true;
         self.irq_enabled_needs_to_be_cleared = false;
         self.frame_counter_irq = false;
+        self.frame_irq_clear_pending = false;
         self.is_get_phase = false;
 
         // Reset the audio sampler
@@ -415,6 +528,39 @@ mod tests {
     fn test_apply_master_gain_clamps_range() {
         assert!((apply_master_gain(30.0) - 1.0).abs() < f32::EPSILON);
         assert!((apply_master_gain(-30.0) + 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn five_step_half_frame_at_14913() {
+        let mut apu = Apu::new();
+        // Simulate applied $80 write: 5-step, length 2, immediate half → length 1.
+        apu.pulse1.set_enabled(true);
+        apu.pulse1.set(0x4000, 0x10);
+        apu.pulse1.set(0x4003, 0x18); // length = 2
+        assert_eq!(apu.pulse1.length_counter, 2);
+        apu.frame_counter_mode = Step5;
+        apu.frame_step = 0;
+        apu.frame_counter = 0;
+        apu.block_frame_tick = 0;
+        apu.clock_quarter_frame();
+        apu.clock_half_frame();
+        apu.block_frame_tick = 2;
+        assert_eq!(apu.pulse1.length_counter, 1);
+
+        // Run 14913 sequencer clocks (skip apply cycle).
+        let mut half_at = None;
+        for i in 1..=15000u32 {
+            if apu.block_frame_tick > 0 {
+                apu.block_frame_tick -= 1;
+            }
+            let len_before = apu.pulse1.length_counter;
+            apu.clock_frame_counter();
+            if len_before == 1 && apu.pulse1.length_counter == 0 {
+                half_at = Some(i);
+                break;
+            }
+        }
+        assert_eq!(half_at, Some(14913), "5-step first half should be at cycle 14913, got {half_at:?}");
     }
 }
 

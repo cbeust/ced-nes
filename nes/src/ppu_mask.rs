@@ -89,23 +89,17 @@ impl PpuMask {
         let new_bg     = 0 != (value & (1 << 3));
         let new_sprite = 0 != (value & (1 << 4));
 
-        // Enabling rendering is delayed (latched after 3 BG / 4 sprite PPU dots).
-        // Disabling rendering takes effect immediately.
+        // Both enabling and disabling rendering are delayed (latched after 3 BG / 4 sprite PPU dots).
         if new_bg != self.background_rendering_effective {
-            if new_bg {
-                self.background_rendering_pending = Some((new_bg, BG_RENDER_DELAY));
-            } else {
-                self.background_rendering_effective = false;
-                self.background_rendering_pending = None;
-            }
+            self.background_rendering_pending = Some((new_bg, BG_RENDER_DELAY));
+        } else {
+            self.background_rendering_pending = None;
         }
         if new_sprite != self.sprite_rendering_effective {
-            if new_sprite {
-                self.sprite_rendering_pending = Some((new_sprite, SPRITE_RENDER_DELAY));
-            } else {
-                self.sprite_rendering_effective = false;
-                self.sprite_rendering_pending = None;
-            }
+            let delay = if new_sprite { SPRITE_RENDER_DELAY } else { BG_RENDER_DELAY };
+            self.sprite_rendering_pending = Some((new_sprite, delay));
+        } else {
+            self.sprite_rendering_pending = None;
         }
     }
 
@@ -137,7 +131,15 @@ impl PpuMask {
         self.sprite_rendering_effective
     }
 
+    pub fn has_pending(&self) -> bool {
+        self.background_rendering_pending.is_some() || self.sprite_rendering_pending.is_some()
+    }
+
     pub fn greyscale(&self) -> bool {
         self.greyscale
+    }
+
+    pub fn is_rendering_enabled(&self) -> bool {
+        self.background_rendering() || self.sprite_rendering()
     }
 }

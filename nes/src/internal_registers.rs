@@ -37,6 +37,15 @@ impl IR {
         self.set_coarse_x((self.coarse_x() + 1) & 0b11111);
     }
 
+    pub fn increment_horiz_v(&mut self) {
+        if self.coarse_x() == 31 {
+            self.set_coarse_x(0);
+            self.switch_horizontal_nametable();
+        } else {
+            self.increment_coarse_x();
+        }
+    }
+
     pub fn increment_coarse_y(&mut self) {
         debug!(target: "ir", "increment_coarse_y IR:{}",self);
         self.set_coarse_y((self.coarse_y() + 1) & 0b11111);

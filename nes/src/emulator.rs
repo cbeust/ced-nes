@@ -1,25 +1,25 @@
+use crate::apu::dmc::DmaCycle;
 use crate::apu::Apu;
-use crate::constants::{RomInfo, CAP_FPS, CPU_TYPE_NEW, DEBUG_ASM, DEBUG_MESEN, HEIGHT, WIDTH, WINDOW_TITLE};
+use crate::constants::{RomInfo, CAP_FPS, DEBUG_ASM, DEBUG_MESEN, HEIGHT, WIDTH, WINDOW_TITLE};
 use crate::joypad::{Button, Joypad};
 use crate::mappers::mapper_base::MapperBase;
 use crate::mesen_logger::{MesenLogger, LOG_CYCLE, LOG_SCANLINE};
 use crate::nes_memory::NesMemory;
 use crate::ppu2::{PpuResult, CURRENT_CYCLE, CURRENT_SCANLINE};
 use crate::rom::Rom;
-use crate::Args;
+use crate::{udi_interface, Args};
 use cpu::config::{Config, System};
-use cpu::cpu::Cpu;
 use cpu::cpu2::Cpu2;
 use cpu::external_logger::{DefaultLogger, IExternalLogger};
 use cpu::labels::Labels;
 use cpu::memory::Memory;
-use enum_dispatch::enum_dispatch;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use gilrs::{Axis, Button as GilButton, EventType, Gilrs};
+use reqwest::blocking::Response;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tracing::{debug, info, warn};
 use crate::bk2::Bk2Movie;
@@ -36,67 +36,11 @@ pub struct FrameStat {
 pub static FRAME: Lazy<RwLock<[u8; WIDTH * HEIGHT]>> =
     Lazy::new(|| RwLock::new([0; WIDTH * HEIGHT]));
 
-/// Trait that abstracts over `Cpu<NesMemory>` and `Cpu2<NesMemory>`.
-#[allow(dead_code)]
-#[enum_dispatch]
-pub trait CpuInterface {
-    fn set_pc(&mut self, pc: u16);
-    fn pc(&self) -> u16;
-    fn set_s(&mut self, v: u8);
-    fn nmi(&mut self);
-    fn irq(&mut self);
-    fn get_cycles(&self) -> u128;
-    fn is_get_phase(&self) -> bool;
-    fn add_cycles(&mut self, cycles: u128);
-    fn one_cycle(&mut self, config: &mut Config, breakpoints: &HashSet<u16>) -> (bool, u8);
-    fn set_get_phase(&mut self, get: bool);
-    fn memory(&mut self) -> &mut NesMemory;
-}
-
-impl CpuInterface for Cpu<NesMemory> {
-    fn set_pc(&mut self, pc: u16) { Cpu::set_pc(self, pc); }
-    fn pc(&self) -> u16 { Cpu::pc(self) }
-    fn set_s(&mut self, v: u8) { self.s = v; }
-    fn nmi(&mut self) { Cpu::nmi(self); }
-    fn irq(&mut self) { Cpu::irq(self); }
-    fn get_cycles(&self) -> u128 { self.cycles }
-    fn is_get_phase(&self) -> bool { false }
-    fn add_cycles(&mut self, cycles: u128) { self.cycles += cycles; }
-    fn one_cycle(&mut self, config: &mut Config, breakpoints: &HashSet<u16>) -> (bool, u8) {
-        Cpu::one_cycle(self, config, breakpoints)
-    }
-    fn set_get_phase(&mut self, _get: bool) {}
-    fn memory(&mut self) -> &mut NesMemory { &mut self.memory }
-}
-
-impl CpuInterface for Cpu2<NesMemory> {
-    fn set_pc(&mut self, pc: u16) { Cpu2::set_pc(self, pc); }
-    fn pc(&self) -> u16 { Cpu2::pc(self) }
-    fn set_s(&mut self, v: u8) { self.s = v; }
-    fn nmi(&mut self) { Cpu2::nmi(self); }
-    fn irq(&mut self) { Cpu2::irq(self); }
-    fn get_cycles(&self) -> u128 { self.cycles }
-    fn is_get_phase(&self) -> bool { self.is_get_phase }
-    fn add_cycles(&mut self, cycles: u128) { self.cycles += cycles; }
-    fn one_cycle(&mut self, config: &mut Config, breakpoints: &HashSet<u16>) -> (bool, u8) {
-        Cpu2::one_cycle(self, config, breakpoints)
-    }
-    fn set_get_phase(&mut self, get: bool) { self.is_get_phase = get; }
-    fn memory(&mut self) -> &mut NesMemory { &mut self.memory }
-}
-
-#[enum_dispatch(CpuInterface)]
-pub(crate) enum CpuType {
-    Old(Cpu<NesMemory>),
-    New(Cpu2<NesMemory>),
-}
-
-
 pub struct Emulator {
     // New
     // pub cpu: Cpu2<NesMemory>,
     // pub cpu: Cpu<NesMemory>,
-    pub(crate) cpu: CpuType,
+    pub(crate) cpu: Cpu2<NesMemory>,
 
     pub(crate) ppu: Arc<RwLock<Ppu2>>,
 
@@ -191,8 +135,7 @@ impl Emulator {
             Some(Box::new(DefaultLogger::default()))
         };
         // Old
-        let mut cpu = if CPU_TYPE_NEW { CpuType::New(Cpu2::new(nes_memory, &config, logger)) }
-            else { CpuType::Old(Cpu::new(nes_memory, None, &config, logger))};
+        let mut cpu = Cpu2::new(nes_memory, &config, logger);
         // let mut cpu = Cpu::new(nes_memory, None, &config, logger);
         // let mut cpu = Cpu2::new(nes_memory); // , None, &config, logger);
         // New
@@ -262,6 +205,10 @@ impl Emulator {
         // *CYCLES.write().unwrap() = new_cycles;
 
         let mut frame_completed = false;
+        // Whether the IRQ level detector is asserted this CPU cycle. The CPU
+        // polls it at fixed points inside each instruction, so the emulator must
+        // keep it asserted (and clear it once acknowledged) rather than firing.
+        let mut irq_line = false;
 
         //
         // Tick the PPU three times
@@ -271,15 +218,15 @@ impl Emulator {
             let sprite_rendering = self.cpu.memory().ppu_mask.sprite_rendering();
             let background_rendering = self.cpu.memory().ppu_mask.background_rendering();
             // info!("PPU TICK");
-            let PpuResult { vbl, frame_start, frame_end, irq_requested } =
+            let PpuResult { vbl: _, frame_start, frame_end, irq_requested } =
                 self.ppu.write().unwrap().tick(sprite_rendering, background_rendering,
                     &mut self.cpu.memory());
-            if vbl && self.cpu.memory().is_vbl_enabled() {
-                // DEBUG TEXT
-                // self.display_vram();
-                self.cpu.nmi();
-            }
+            // NMI is handled via memory.check_nmi() on falling edge of /NMI line
+            // if vbl && self.cpu.memory().is_vbl_enabled() {
+            //     self.cpu.nmi();
+            // }
             if irq_requested {
+                irq_line = true;
                 self.cpu.irq();
             }
             if frame_start {
@@ -304,41 +251,214 @@ impl Emulator {
         // New
 
         //
-        // Tick the APU once
+        // Tick the APU once (including DMC timer — may request a DMC DMA).
         //
         let is_get = self.cpu.is_get_phase();
-        let irq_requested = self.apu.write().unwrap().step(self.cpu.memory(), is_get);
-        if irq_requested {
+        // While OUT0 is held high, every put edge reloads the controller shift
+        // register (multi-cycle strobe from STA #$xx / STA $4016 sequences).
+        if !is_get {
+            let mut j1 = self.cpu.memory().joypad.write().unwrap();
+            j1.on_put_edge();
+            drop(j1);
+            let mut j2 = self.cpu.memory().joypad2.write().unwrap();
+            j2.on_put_edge();
+        }
+        let apu_irq_requested = self.apu.write().unwrap().step(self.cpu.memory(), is_get);
+        if apu_irq_requested {
+            irq_line = true;
             self.cpu.irq();
         }
-
-        //
-        // Tick the CPU once
-        //
-        // Old
-        // let has_advanced = self.cpu.one_cycle(&mut self.config, &HashSet::new());
-        // New
-        let (has_advanced, _cycles) = self.cpu.one_cycle(&mut self.config, &HashSet::new());
-        if has_advanced {
-            *LOG_SCANLINE.write().unwrap() = *CURRENT_SCANLINE.read().unwrap();
-            *LOG_CYCLE.write().unwrap() = *CURRENT_CYCLE.read().unwrap();
+        // Level detector high this cycle: drop any asserted IRQ so a masked one
+        // cannot fire after the APU/DMA acknowledged it.
+        if !irq_line {
+            self.cpu.clear_irq();
         }
-        let rendering_enabled = self.is_rendering_enabled();
-        if self.cpu.memory().pause_cpu_for_dma {
-            let cycles = if (self.cpu.get_cycles() % 2) == 0 { 514 * 3 } else { 513 * 3};
-            let mut ppu = self.ppu.write().unwrap();
+        //
+        // DMC DMA: may only halt on CPU read cycles. Dummy (non-fetch) cycles
+        // re-issue the stalled read — required for DMA + $2002/$2007/$4015/$4016.
+        //
+        // Memory side-effects run *outside* the APU lock so dummy/conflict reads of
+        // $4015 can re-enter Apu::get without deadlocking the RwLock.
+        //
+        let pending_read = self.cpu.pending_read_address();
+        let pending_write = self.cpu.pending_is_write();
+        let mut has_advanced = false;
 
-            for _ in 0..cycles {
-                ppu.update_beam(rendering_enabled);
+        // If an OAM DMA was scheduled by a prior $4014 write, run the full
+        // transfer now (cycle-stepped with DMC). Outer code already did 3 PPU
+        // dots for this cycle; run_oam accounts for that on the first step.
+        if self.cpu.memory().oam_dma.is_some() && !pending_write {
+            self.run_oam_dma_with_dmc(true);
+            self.cpu.dma_on_previous_cycle = true;
+            return (false, 1, frame_completed);
+        }
+
+        let dma_action = {
+            let mut apu = self.apu.write().unwrap();
+            // Load-DMA delay still advances on write cycles (halt cannot start yet).
+            if pending_write && !apu.dmc_dma_active() {
+                apu.dmc_tick_load_delay();
+                DmaCycle::None
+            } else {
+                apu.dmc_take_cycle(is_get, pending_write)
             }
-            self.cpu.add_cycles(cycles as u128);
-            self.cpu.memory().pause_cpu_for_dma = false;
-            // DMA always ends on a PUT
-            debug!(target: "asm", "Forcing CPU to PUT");
-            self.cpu.set_get_phase(true);
+        };
+
+        let dmc_stalled = self.apply_dmc_cycle(dma_action, pending_read);
+
+        if dmc_stalled {
+            self.cpu.dma_on_previous_cycle = true;
+            if matches!(dma_action, DmaCycle::SampleFetch { .. }) {
+                self.cpu.set_get_phase(false);
+            } else {
+                self.cpu.set_get_phase(!self.cpu.is_get_phase());
+            }
+        } else {
+            let (advanced, _cycles) = self.cpu.one_cycle(&mut self.config, &HashSet::new());
+            if advanced {
+                self.cpu.dma_on_previous_cycle = false;
+            }
+            has_advanced = advanced;
+            if has_advanced {
+                *LOG_SCANLINE.write().unwrap() = *CURRENT_SCANLINE.read().unwrap();
+                *LOG_CYCLE.write().unwrap() = *CURRENT_CYCLE.read().unwrap();
+            }
         }
 
-        (has_advanced, 1, frame_completed) // self.cpu.cycles)
+        if !is_get {
+            self.cpu.memory().joypad.write().unwrap().end_put_cycle();
+            self.cpu.memory().joypad2.write().unwrap().end_put_cycle();
+        }
+
+        (has_advanced, 1, frame_completed)
+    }
+
+    /// Perform one DMC DMA cycle's memory side effects. Returns true if CPU is stalled.
+    fn apply_dmc_cycle(&mut self, dma_action: DmaCycle, pending_read: Option<u16>) -> bool {
+        match dma_action {
+            DmaCycle::None => false,
+            DmaCycle::DummyRead => {
+                if let Some(addr) = pending_read {
+                    let _ = self.cpu.memory().get(addr);
+                }
+                true
+            }
+            DmaCycle::SampleFetch { address } => {
+                let prev_internal = self.cpu.memory().cpu_internal_bus;
+                let mut byte = self.cpu.memory().get(address);
+                let apu_mirror = 0x4000 | (address & 0x1F);
+                match apu_mirror {
+                    0x4015 => {
+                        self.cpu.memory().cpu_internal_bus = prev_internal;
+                        let _ = self.cpu.memory().get(0x4015);
+                        self.cpu.memory().cpu_data_bus = byte;
+                    }
+                    0x4016 | 0x4017 => {
+                        let cont = self.cpu.memory().get(apu_mirror);
+                        byte = (byte & 0xE0) | (cont & 0x1F);
+                        self.cpu.memory().cpu_data_bus = byte;
+                    }
+                    _ => {}
+                }
+                self.apu.write().unwrap().dmc_finish_fetch(byte);
+                true
+            }
+        }
+    }
+
+    /// Run OAM DMA with DMC interleaving (AccuracyCoin DMC DMA + OAM DMA).
+    ///
+    /// Timing model (NESdev):
+    /// - Base length 513 (halt on put) or 514 (halt on get, needs align).
+    /// - DMC halt/dummy/align overlap OAM work (no extra cost).
+    /// - DMC sample get steals a get; OAM needs a following put align → +1 OAM-work
+    ///   slot deferred (net +2 wall cycles for the pair).
+    /// - DMC still in progress after OAM ends is finished before CPU resumes.
+    ///
+    /// Sprite bytes are copied first (with APU get/put steps between reads so
+    /// $4015 clear-delay and open bus evolve mid-transfer). The loop below is
+    /// the cycle/timing engine for DMC interleave and CPU stall length.
+    fn run_oam_dma_with_dmc(&mut self, outer_ppu_apued: bool) {
+        let Some(oam) = self.cpu.memory().oam_dma.take() else {
+            return;
+        };
+        // 6502 bus stays on the address after the $4014 write (halted). Used for
+        // APU register activation during OAM (AccuracyCoin APU Reg Activation).
+        self.cpu.memory().cpu_bus_address = self.cpu.pc();
+        self.cpu.memory().oam_dma_fetching = true;
+        // Each sprite fetch is an OAM get: apply pending $4015 frame-IRQ clear
+        // first so the first status mirror sees the flag and later ones do not
+        // (AccuracyCoin APU Register Activation). Do not full-step the APU —
+        // that would double-count against the timing loop below.
+        for i in 0..256u16 {
+            self.apu.write().unwrap().tick_frame_irq_clear();
+            let v = self.cpu.memory().get(oam.page.wrapping_add(i));
+            let addr = oam.oam_addr.wrapping_add(i as u8);
+            self.ppu.write().unwrap().write_oam(addr, v);
+        }
+        self.cpu.memory().oam_dma_fetching = false;
+        self.ppu.write().unwrap().pending_oam_corruption_row = None;
+
+        let pending_read = self.cpu.pending_read_address();
+        let rendering_enabled = self.is_rendering_enabled();
+
+        // Base length 513 (halt on put) or 514 (halt on get + alignment put).
+        let mut work_left: i32 = if self.cpu.is_get_phase() { 514 } else { 513 };
+        // After a DMC get, skip the next put for OAM work accounting (alignment).
+        let mut align_puts: i32 = 0;
+        let mut first = true;
+
+        while work_left > 0 {
+            let is_get = self.cpu.is_get_phase();
+
+            if !(first && outer_ppu_apued) {
+                let _ = self.apu.write().unwrap().step(self.cpu.memory(), is_get);
+                let mut ppu = self.ppu.write().unwrap();
+                for _ in 0..3 {
+                    ppu.update_beam(rendering_enabled);
+                }
+            }
+            first = false;
+
+            let dma_action = self.apu.write().unwrap().dmc_take_cycle(is_get, false);
+            let dmc_get = matches!(dma_action, DmaCycle::SampleFetch { .. });
+            let _ = self.apply_dmc_cycle(dma_action, pending_read);
+
+            if dmc_get {
+                // This get doesn't advance OAM work; require a put align next.
+                align_puts = 1;
+            } else if align_puts > 0 && !is_get {
+                // Alignment put — no OAM work.
+                align_puts = 0;
+            } else {
+                work_left -= 1;
+            }
+
+            self.cpu.set_get_phase(!is_get);
+        }
+
+        // After OAM DMA used for $4017 timing sync (AccuracyCoin Frame Counter
+        // 4/5-step), the following instruction stream assumes the next CPU cycle
+        // is a get so STA $4017 ends on put (3-cycle reset delay).
+        self.cpu.set_get_phase(true);
+
+        // Finish DMC if still active after OAM work is done.
+        for _ in 0..16 {
+            if !self.apu.read().unwrap().dmc_dma_active() {
+                break;
+            }
+            let is_get = self.cpu.is_get_phase();
+            let _ = self.apu.write().unwrap().step(self.cpu.memory(), is_get);
+            {
+                let mut ppu = self.ppu.write().unwrap();
+                for _ in 0..3 {
+                    ppu.update_beam(rendering_enabled);
+                }
+            }
+            let dma_action = self.apu.write().unwrap().dmc_take_cycle(is_get, false);
+            let _ = self.apply_dmc_cycle(dma_action, pending_read);
+            self.cpu.set_get_phase(!is_get);
+        }
     }
 
     // pub fn display_chr(&mut self, rom: Rom) -> Frame {
@@ -397,23 +517,47 @@ impl Emulator {
         line
     }
 
-    pub(crate) fn debug(&mut self) {
-        let mut line: String = "".into();
+    pub(crate) fn get_cpu_memory(&mut self) -> Vec<u8> {
+        self.cpu.memory().main_memory()
+    }
 
+    pub(crate) fn get_ppu_memory(&self) -> Vec<u8> {
+        self.ppu.read().unwrap().get_video_memory()
+    }
+
+    pub(crate) fn debug(&mut self) -> reqwest::Result<Response> {
+        info!("Emulator received DEBUG message");
+
+        // Capture CPU registers immediately, before any dump/HTTP side work.
+        let regs = udi_interface::RegisterSnapshot::from_emulator(self);
+        info!(
+            "Debug snapshot A={:02X} X={:02X} Y={:02X} S={:02X} P={:02X} PC={:04X}",
+            regs.a, regs.x, regs.y, regs.s, regs.p, regs.pc
+        );
+
+        let cpu_memory = self.get_cpu_memory();
+        let ppu_memory = self.get_ppu_memory();
+        let oam_memory = self.ppu.read().unwrap().get_oam_memory();
+
+        // Push to UDI first (registers before the large memory body).
+        let response = udi_interface::push_debug_state(&regs, &cpu_memory, &ppu_memory, &oam_memory);
+
+        // Optional local hex dump (slow); do not block debugger UI on this.
+        let mut line: String = "".into();
         {
-            let mut i: u32 = 0;
+            let mut i: usize = 0;
             line.push_str("\nCPU Memory\n");
             line.push_str("==========\n");
             while i <= 0xffff {
                 let mut values = Vec::new();
                 for a in 0..16 {
-                    values.push(self.cpu.memory().get(i as u16 + a as u16));
+                    let byte = cpu_memory[i + a];
+                    values.push(byte);
                 }
                 line.push_str(&self.line(i as u16, &values));
                 i += 16;
             }
         }
-
         {
             let mut i: u32 = 0;
             line.push_str("\nPPU Memory\n");
@@ -421,34 +565,41 @@ impl Emulator {
             while i <= 0x3fff {
                 let mut values = Vec::new();
                 for a in 0..16 {
-                    values.push(self.ppu.read().unwrap()
-                        .get_vram((i as u16 + a as u16) as usize, &mut self.cpu.memory().mapper));
+                    let byte = self.ppu.read().unwrap()
+                        .get_vram((i as u16 + a as u16) as usize, &mut self.cpu.memory().mapper);
+                    values.push(byte);
                 }
 
                 line.push_str(&self.line(i as u16, &values));
                 i += 16;
             }
         }
-
         {
-            let mut i: u32 = 0;
+            let mut i: usize = 0;
             line.push_str("\nOAM\n");
             line.push_str("===\n");
             while i <= 0xff {
                 let mut values = Vec::new();
                 for a in 0..16 {
-                    values.push(self.ppu.read().unwrap().oam[a + i as usize]);
+                    let byte = oam_memory[a + i];
+                    values.push(byte);
                 }
                 line.push_str(&self.line(i as u16, &values));
                 i += 16;
             }
         }
+        line.push_str(&format!(
+            "\nRegisters A={:02X} X={:02X} Y={:02X} S={:02X} P={:02X} PC={:04X}\n",
+            regs.a, regs.x, regs.y, regs.s, regs.p, regs.pc
+        ));
 
         let home_dir = std::env::home_dir().unwrap();
         let home_dir = home_dir.to_str().unwrap();
         let file = &format!("{home_dir}\\t\\debug.txt");
         let _ = std::fs::write(file, line);
         info!("Wrote {file}");
+
+        response
     }
 }
 
@@ -569,7 +720,7 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
 
                                     if let Ok(mut state) = shared_state.write() {
                                         if paused {
-                                            state.paused_cycle_count = emulator.cpu.get_cycles();
+                                            state.paused_cycle_count = emulator.cpu.get_cycles() as u128;
                                             state.title = format!(
                                                 "{} - Paused - Cycle {} - {}",
                                                 WINDOW_TITLE,
@@ -582,8 +733,12 @@ pub fn launch_emulator(args: Args, mut rom_info: RomInfo,
                                     }
                                 }
                             }
-                            ToEmulatorMessage::_Debug => {
-                                emulator.debug();
+                            ToEmulatorMessage::Debug => {
+                                match emulator.debug() {
+                                    Ok(response) => info!("Posted JSON to localhost:9000: {:?}",
+                                        response.status()),
+                                    Err(e) => warn!("Failed to post JSON to localhost:9000: {e:?}"),
+                                }
                             }
                             ToEmulatorMessage::SoundAll(enabled) => {
                                 emulator.apu.write().unwrap().set_sound_enabled(enabled);
@@ -786,5 +941,5 @@ pub enum ToEmulatorMessage {
     SoundTriangle(bool),
     SoundNoise(bool),
     SoundDmc(bool),
-    _Debug,
+    Debug,
 }

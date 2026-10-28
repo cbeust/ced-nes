@@ -24,16 +24,18 @@ mod ppu2;
 mod delayed;
 mod fm2;
 mod bk2;
-mod vizia;
+mod nes_vizia;
+mod debugger_interface;
+mod udi_interface;
 
 use crate::config_file::EmulatorConfig;
-use crate::constants::{Library, RomInfo, ALL_MAPPERS, CPU_TYPE_NEW, LIBRARY, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM, TRACE_FILE_NAME };
+use crate::constants::{Library, RomInfo, ALL_MAPPERS, LIBRARY, LOG_TO_FILE, ROM_NAMES, SELECTED_ROM };
 use crate::logging::init_logging;
 use crate::rom_list::find_roms_with_mappers;
 use clap::Parser;
 use tracing::debug;
 use crate::minifb::main_minifb;
-use crate::vizia::{create_vizia_app};
+use crate::nes_vizia::{create_vizia_app};
 
 #[derive(Default, Debug, Parser)]
 #[command(author, version, about, long_about = None)]
@@ -87,8 +89,9 @@ impl Clone for Args {
 }
 
 // #[tokio::main]
-pub fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let filename = if CPU_TYPE_NEW { "trace-new-cpu.txt" } else { TRACE_FILE_NAME };
+#[tokio::main]
+pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let filename = "trace-new-cpu.txt";
     let _guard = init_logging(
         if LOG_TO_FILE { Some(filename.into() ) } else { None },
         cpu::cpu::LOG_ASYNC
@@ -153,7 +156,6 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match LIBRARY {
         Library::Vizia => {
-            // _main2();
             create_vizia_app(args, roms.clone(), rom_info, config.clone());
         }
         Library::MiniFb => { main_minifb(args); }

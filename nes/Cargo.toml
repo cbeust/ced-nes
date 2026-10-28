@@ -20,7 +20,7 @@ test-case = "3.3.1"
 [dependencies]
 
 cpu = { path = "../cpu" }
-tokio = {  version = "1.38.0", features = [ "macros", "sync", "rt-multi-thread" ] }
+tokio = { version = "1.38.0", features = ["macros", "sync", "rt-multi-thread", "rt"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["json", "env-filter"] }
 tracing-appender = "0.2.3"
@@ -34,6 +34,7 @@ rand = "0.10.1"
 dirs = "6.0.0"
 serde = { version = "1.0.219", features = ["derive" ] }
 serde_json = "1.0.128"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 enum_dispatch = "0.3.13"
 rodio = "0.22.2"
 crossbeam-queue = "0.3.12"
@@ -44,7 +45,8 @@ md5 = "0.8.0"
 minifb = "0.28.0"
 vizia = {
     git = "https://github.com/vizia/vizia",
-    rev = "cdfcedd5656c3eae99c6d27ecf8ae899de3f21e2",
-    version = "0.4.0",
+#    path = "../../vizia",
+#    rev = "cdfcedd5656c3eae99c6d27ecf8ae899de3f21e2",
+#    version = "0.4.0",
     features = ["winit"]
 }

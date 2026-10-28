@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
-use tracing::{debug, info};
+use tracing::debug;
 use crate::config::{Config, System};
 use crate::constants;
 use crate::constants::*;
@@ -13,6 +13,13 @@ use crate::messages::LogMsg;
 pub const CPU2_DEBUG: bool = false;
 
 const STACK_ADDRESS: u16 = 0x100;
+
+/// The 8 relative branch opcodes. Branches are the only instructions that poll
+/// for interrupts somewhere other than just before their final cycle: they poll
+/// before cycle 2 always, and before cycle 4 only when they cross a page.
+fn is_branch_opcode(op: u8) -> bool {
+    match op { BPL | BMI | BVC | BVS | BCC | BCS | BNE | BEQ => true, _ => false }
+}
 
 pub struct Cpu2Memory {
     ram: [u8; 0x10000],
@@ -67,13 +74,13 @@ pub struct Cpu2<T: Memory> {
     pub s: u8,
     pub p: StatusFlags,
     /// 0...7
-    current_cycle: usize,
+    pub current_cycle: usize,
     pub cycles: u128,
     no_increment: bool,
     low_byte: usize,
     pointer: u16,
     finished: bool,
-    current_opcode: u8,
+    pub current_opcode: u8,
     current_value: u8,
     current_address: u16,
     page_crossed: bool,
@@ -88,6 +95,18 @@ pub struct Cpu2<T: Memory> {
     system: System,
 
     pub is_get_phase: bool,
+    /// Interrupt detected at one of the *extra* poll points of the instruction in
+    /// progress: branches poll before cycle 2, BRK polls before cycles 2..5.
+    irq_poll: bool,
+    latched_vector: Option<(u16, u16)>,
+    /// Interrupt poll sampled at the start of the cycle about to run. At an
+    /// instruction boundary this is the poll before the final cycle, which is
+    /// where the 6502 polls for every instruction.
+    poll_snapshot: bool,
+    poll_snapshot_vector: Option<(u16, u16)>,
+    pub hardware_interrupt: Option<(u16, u16)>,
+    pub base_high: u8,
+    pub dma_on_previous_cycle: bool,
 }
 
 impl<T: Memory> Cpu2<T> {
@@ -102,9 +121,112 @@ impl<T: Memory> Cpu2<T> {
         self._pc = value;
     }
 
+    /// Force the next CPU cycle to begin a new instruction at `pc`.
+    /// Used by tests that jump into ROM routines mid-emulation.
+    pub fn jump_to_instruction(&mut self, pc: u16) {
+        self._pc = pc;
+        self.finished = true;
+        self.hardware_interrupt = None;
+        self.current_cycle = 1;
+        self.instruction_cycles = 0;
+        self.pc_was_changed = false;
+    }
+
+    /// Address the CPU will put on the bus for the next cycle's read, if any.
+    /// Used so DMC DMA dummy cycles can re-issue the stalled read (register conflicts).
+    pub fn pending_read_address(&self) -> Option<u16> {
+        use crate::constants::*;
+        // About to fetch a new opcode
+        if self.finished {
+            return Some(self._pc);
+        }
+        if self.pending_is_write() {
+            return None;
+        }
+        if let Some((low, high)) = self.hardware_interrupt {
+            return match self.current_cycle {
+                1 | 2 => Some(self._pc),
+                6 => Some(low),
+                7 => Some(high),
+                _ => None,
+            };
+        }
+        let op = self.current_opcode;
+        let c = self.current_cycle;
+        // Operand fetches read from PC
+        if c == 2 || c == 3 {
+            // Many ops read PC on cycles 2–3; data reads use current_address later.
+            // Operand fetch cycles always read from PC.
+            return Some(self._pc);
+        }
+        // Absolute / ZP data reads
+        match op {
+            LDA_ABS | LDX_ABS | LDY_ABS | EOR_ABS | AND_ABS | ORA_ABS | ADC_ABS | SBC_ABS
+            | CMP_ABS | CPX_ABS | CPY_ABS | BIT_ABS | LAX_ABS | NOP_ABS_1 if c == 4 => {
+                Some(self.current_address)
+            }
+            LDA_ABS_X | LDY_ABS_X | EOR_ABS_X | AND_ABS_X | ORA_ABS_X | ADC_ABS_X | SBC_ABS_X
+            | CMP_ABS_X | LDA_ABS_Y | LDX_ABS_Y | EOR_ABS_Y | AND_ABS_Y | ORA_ABS_Y
+            | ADC_ABS_Y | SBC_ABS_Y | CMP_ABS_Y | LAX_ABS_Y | LAS if c == 4 || c == 5 => {
+                Some(self.current_address)
+            }
+            LDA_ZP | LDX_ZP | LDY_ZP | EOR_ZP | AND_ZP | ORA_ZP | ADC_ZP | SBC_ZP | CMP_ZP
+            | CPX_ZP | CPY_ZP | BIT_ZP | LAX_ZP if c == 3 => Some(self.current_address),
+            // Default: treat as opcode/stream read from PC for halt purposes
+            _ => Some(self._pc),
+        }
+    }
+
+    /// True if the next tick is a write cycle (DMA cannot halt on writes).
+    pub fn pending_is_write(&self) -> bool {
+        use crate::constants::*;
+        if self.finished {
+            return false;
+        }
+        if self.hardware_interrupt.is_some() {
+            return matches!(self.current_cycle, 3 | 4 | 5);
+        }
+        let op = self.current_opcode;
+        let c = self.current_cycle;
+        // Stack pushes and store cycles — DMC DMA must wait for a read.
+        matches!(
+            (op, c),
+            // Stores
+            (
+                STA_ABS | STX_ABS | STY_ABS | STA_ZP | STX_ZP | STY_ZP
+                | STA_ABS_X | STA_ABS_Y | STA_ZP_X | STX_ZP_Y | STY_ZP_X
+                | STA_IND_X | STA_IND_Y | SAX_ZP | SAX_ZP_Y | SAX_ABS | SAX_IND_X,
+                4 | 5 | 6
+            )
+            | (SHA_ABS_Y, 5)
+            | (TAS_ABS_Y, 5)
+            | (SHY_ABS_X, 5)
+            | (SHX_ABS_X, 5)
+            | (SHA_IND_Y, 6)
+            // RMW write-back
+            | (
+                ASL_ABS | LSR_ABS | ROL_ABS | ROR_ABS | INC_ABS | DEC_ABS
+                | ASL_ZP | LSR_ZP | ROL_ZP | ROR_ZP | INC_ZP | DEC_ZP
+                | ASL_ABS_X | LSR_ABS_X | ROL_ABS_X | ROR_ABS_X | INC_ABS_X | DEC_ABS_X
+                | ASL_ZP_X | LSR_ZP_X | ROL_ZP_X | ROR_ZP_X | INC_ZP_X | DEC_ZP_X,
+                5 | 6 | 7
+            )
+            // JSR stack pushes (PCH, PCL)
+            | (JSR, 4 | 5)
+            // PHA / PHP stack push
+            | (PHA | PHP, 3)
+            // BRK stack pushes (and IRQ/NMI use the same path with BRK opcode state)
+            | (BRK, 3 | 4 | 5)
+        )
+    }
+
     fn inc_pc(&mut self) {
         let v = self._pc.wrapping_add(1);
         self.set_pc(v);
+    }
+
+    pub fn set_s(&mut self, value: u8) {
+        self.s = value;
     }
 }
 
@@ -142,6 +264,13 @@ impl<T: Memory> Cpu2<T> {
             pc_was_changed: false,
             system: System::Nes,
             is_get_phase: true, // should be random
+            irq_poll: false,
+            latched_vector: None,
+            poll_snapshot: false,
+            poll_snapshot_vector: None,
+            hardware_interrupt: None,
+            base_high: 0,
+            dma_on_previous_cycle: false,
         }
     }
 
@@ -177,43 +306,99 @@ impl<T: Memory> Cpu2<T> {
         // Save the registers for logging
 
         if self.finished {
-            if let Some((low, high)) = self.pending_interrupt {
-                // NMI (low == 0xfffa) is non-maskable and always fires.
-                // IRQ (low == 0xfffe) is maskable: only fire when I flag is clear.
-                let is_nmi = low == 0xfffa;
-                if is_nmi || !self.p.i() {
-                    self.handle_interrupt_full(false, low, high);
-                    info!("PC after interrupt:{:04X}", self.pc());
+            let op_done = self.current_opcode;
+            let is_branch = is_branch_opcode(op_done);
+            let no_final_poll = op_done == BRK || (is_branch && !self.page_crossed);
+            let detected_vector = if self.irq_poll {
+                if self.pending_interrupt == Some((0xfffa, 0xfffb)) {
+                    self.pending_interrupt
+                } else {
+                    self.latched_vector.or(self.pending_interrupt)
                 }
-                // Always clear pending_interrupt: if IRQ was masked, the emulator
-                // will re-raise it next cycle while the IRQ line stays asserted.
-                self.pending_interrupt = None;
-            }
-
-            self.instruction_cycles = 0;
-            self.pc_was_changed = false;
-            self.current_opcode = self.memory.get(self.pc());
-            // if self.current_opcode == 0 {
-            //     println!("BUG BRK");
-            //     let op = self.memory.get(self.pc());
-            // }
-            self.log_info = LogInfo {
-                a: self.a,
-                x: self.x,
-                y: self.y,
-                s: self.s,
-                pc: self.pc(),
-                p: self.p.value(),
+            } else if !no_final_poll && self.poll_snapshot {
+                self.pending_interrupt.or(self.poll_snapshot_vector)
+            } else {
+                None
             };
 
-            self.inc_pc();
-            self.current_cycle = 1;
-            self.no_increment = false;
-            self.finished = false;
+            self.irq_poll = false;
+            self.latched_vector = None;
+            self.poll_snapshot = false;
+            self.poll_snapshot_vector = None;
+
+            if let Some((low, high)) = detected_vector {
+                self.hardware_interrupt = Some((low, high));
+                self.instruction_cycles = 0;
+                self.pc_was_changed = false;
+                self.current_opcode = 0;
+                self.current_cycle = 1;
+                self.no_increment = false;
+                self.finished = false;
+                // Dummy read cycle 1
+                let _ = self.memory.get(self.pc());
+            } else {
+                self.instruction_cycles = 0;
+                self.pc_was_changed = false;
+                self.current_opcode = self.memory.get(self.pc());
+                self.log_info = LogInfo {
+                    a: self.a,
+                    x: self.x,
+                    y: self.y,
+                    s: self.s,
+                    pc: self.pc(),
+                    p: self.p.value(),
+                };
+
+                self.inc_pc();
+                self.current_cycle = 1;
+                self.no_increment = false;
+                self.finished = false;
+            }
+        }
+
+        if self.memory.check_cancel_nmi() {
+            self.cancel_nmi();
+        }
+        if self.memory.check_nmi() {
+            self.nmi();
+        }
+
+        // --- Interrupt polling (6502) ---
+        // A poll is taken at the start of every cycle; `poll_snapshot` therefore
+        // ends up holding the poll before the instruction's final cycle, which is
+        // the point the 6502 actually tests the IRQ line and the I flag.
+        {
+            let pending = self.pending_interrupt;
+            let nmi_pending = match pending { Some((low, _)) => low == 0xfffa, _ => false };
+            let detected = nmi_pending || (pending.is_some() && !self.p.i());
+            self.poll_snapshot = detected;
+            if detected {
+                self.poll_snapshot_vector = pending;
+            } else {
+                self.poll_snapshot_vector = None;
+            }
+            let cyc = self.current_cycle;
+            let is_branch_now = is_branch_opcode(self.current_opcode);
+            if is_branch_now && cyc == 2 {
+                if detected {
+                    self.irq_poll = true;
+                    if self.latched_vector.is_none() || nmi_pending {
+                        self.latched_vector = pending;
+                    }
+                }
+            } else if (self.current_opcode == BRK || self.hardware_interrupt.is_some()) && cyc >= 2 && cyc <= 5 {
+                if nmi_pending {
+                    self.irq_poll = true;
+                    self.latched_vector = pending;
+                }
+            }
         }
         let op = self.current_opcode;
 
-        match op {
+        if let Some((low, high)) = self.hardware_interrupt {
+            self.handle_interrupt(false, low, high);
+        } else {
+            match op {
             CLD | CLC | CLV | CLI | SED | SEC | SEI => {
                 match self.current_cycle {
                     2 => {
@@ -582,6 +767,7 @@ impl<T: Memory> Cpu2<T> {
             LDA_IMM | LDX_IMM | LDY_IMM | EOR_IMM | AND_IMM | ORA_IMM | ADC_IMM | SBC_IMM | CMP_IMM
                 | NOP_7 | NOP_9 | NOP_10 | NOP_11 | NOP_8
                 | USBC_IMM
+                | ANC_IMM | ANC2_IMM | ALR_IMM | ARR_IMM | ANE_IMM | LXA_IMM | SBX_IMM
             => {
                 match self.current_cycle {
                     2 => {
@@ -983,7 +1169,7 @@ impl<T: Memory> Cpu2<T> {
             //
             LDA_ABS_X | LDY_ABS_X | EOR_ABS_X | AND_ABS_X | ORA_ABS_X | ADC_ABS_X | SBC_ABS_X
                 | CMP_ABS_X | LDA_ABS_Y | LDX_ABS_Y | EOR_ABS_Y | AND_ABS_Y | ORA_ABS_Y
-                | ADC_ABS_Y | SBC_ABS_Y | CMP_ABS_Y | LAX_ABS_Y
+                | ADC_ABS_Y | SBC_ABS_Y | CMP_ABS_Y | LAX_ABS_Y | LAS
                 | NOP_1C_ABS_X | NOP_3C_ABS_X | NOP_5C_ABS_X | NOP_7C_ABS_X | NOP_DC_ABS_X | NOP_FC_ABS_X
             => {
                 match self.current_cycle {
@@ -1003,7 +1189,7 @@ impl<T: Memory> Cpu2<T> {
                             | NOP_1C_ABS_X | NOP_3C_ABS_X | NOP_5C_ABS_X | NOP_7C_ABS_X | NOP_DC_ABS_X | NOP_FC_ABS_X
                             => { self.x as u16 }
                             LDA_ABS_Y | LDX_ABS_Y | EOR_ABS_Y | AND_ABS_Y | ORA_ABS_Y | ADC_ABS_Y |
-                            SBC_ABS_Y | CMP_ABS_Y | LAX_ABS_Y => { self.y as u16 }
+                            SBC_ABS_Y | CMP_ABS_Y | LAX_ABS_Y | LAS => { self.y as u16 }
                             _ => { panic!("Should never happen"); }
                         };
                         let old = (high_byte as u16) << 8 | self.low_byte as u16;
@@ -1166,11 +1352,12 @@ impl<T: Memory> Cpu2<T> {
                         //                          add index register to low address byte,
                         //                          increment PC
                         let high_byte = self.memory.get(self.pc()) as usize;
+                        self.base_high = high_byte as u8;
 
                         let old = (high_byte as u16) << 8 | self.low_byte as u16;
                         let increment = match op {
-                            STA_ABS_X | SHY_ABS_X | SHX_ABS_X => { self.x }
-                            STA_ABS_Y | SHA_ABS_Y | TAS_ABS_Y => { self.y }
+                            STA_ABS_X | SHY_ABS_X => { self.x }
+                            STA_ABS_Y | SHA_ABS_Y | SHX_ABS_X | TAS_ABS_Y => { self.y }
                             _ => { panic!("WRONG OPCODE"); }
                         } as usize;
                         self.low_byte = (self.low_byte + increment) & 0xff;
@@ -1333,6 +1520,7 @@ impl<T: Memory> Cpu2<T> {
                         //         4   pointer+1   R  fetch effective address high,
                         //                            add Y to low byte of effective address
                         let high_byte = self.memory.get((self.pointer + 1) & 0xff) as usize;
+                        self.base_high = high_byte as u8;
                         let old = (high_byte << 8) | self.low_byte;
                         self.low_byte = (self.low_byte + self.y as usize) & 0xff;
                         let new = old + self.y as usize;
@@ -1442,6 +1630,7 @@ impl<T: Memory> Cpu2<T> {
                 // exit(1);
             }
         }
+    }
 
         if self.no_increment {
             result = 0;
@@ -1478,7 +1667,9 @@ impl<T: Memory> Cpu2<T> {
         }
         self.current_cycle += 1;
 
-        self.is_get_phase = ! self.is_get_phase;
+        if !self.no_increment {
+            self.is_get_phase = ! self.is_get_phase;
+        }
         result
     }
 
@@ -1676,6 +1867,70 @@ impl<T: Memory> Cpu2<T> {
                 self.set_nz(v);
                 self.finished = true;
             }
+            LAS => {
+                let res = value & self.s;
+                self.a = res;
+                self.x = res;
+                self.s = res;
+                self.set_nz(res);
+                self.finished = true;
+                return;
+            }
+            ANC_IMM | ANC2_IMM => {
+                let res = self.a & value;
+                self.a = res;
+                self.set_nz(res);
+                self.p.set_c(res & 0x80 != 0);
+                self.finished = true;
+                return;
+            }
+            ALR_IMM => {
+                let res = self.a & value;
+                self.p.set_c(res & 0x01 != 0);
+                let shifted = res >> 1;
+                self.a = shifted;
+                self.set_nz(shifted);
+                self.finished = true;
+                return;
+            }
+            ARR_IMM => {
+                let and_val = self.a & value;
+                let c_in = if self.p.c() { 0x80 } else { 0x00 };
+                let res = (and_val >> 1) | c_in;
+                self.a = res;
+                self.p.set_z(res == 0);
+                self.p.set_n(res & 0x80 != 0);
+                self.p.set_c(res & 0x40 != 0);
+                self.p.set_v(((res >> 6) ^ (res >> 5)) & 1 != 0);
+                self.finished = true;
+                return;
+            }
+            ANE_IMM => {
+                // A = (A | MAGIC) & X & value. In tests where outcome is guaranteed, MAGIC is $FF.
+                let res = self.a & self.x & value;
+                self.a = res;
+                self.set_nz(res);
+                self.finished = true;
+                return;
+            }
+            LXA_IMM => {
+                // A = (A | MAGIC) & value, X = A. In tests where outcome is guaranteed, MAGIC is $FF or value is 0.
+                let res = (self.a | 0xFF) & value;
+                self.a = res;
+                self.x = res;
+                self.set_nz(res);
+                self.finished = true;
+                return;
+            }
+            SBX_IMM => {
+                let diff = (self.a & self.x) as u16 - value as u16;
+                let res = (diff & 0xFF) as u8;
+                self.x = res;
+                self.p.set_c(diff < 0x100);
+                self.set_nz(res);
+                self.finished = true;
+                return;
+            }
             NOP_ZP | NOP_13 | NOP_ABS_1 | NOP_14 | NOP_ZP_X | NOP_16 | NOP_17 | NOP_18 | NOP_19
                 | NOP_20 | NOP_1 | NOP_2 | NOP_3 | NOP_4 | NOP_5 | NOP_6 | NOP_7 | NOP_8 | NOP_9 | NOP_10
             | NOP_11 | NOP_1C_ABS_X | NOP_3C_ABS_X | NOP_5C_ABS_X | NOP_7C_ABS_X | NOP_DC_ABS_X | NOP_FC_ABS_X
@@ -1705,13 +1960,14 @@ impl<T: Memory> Cpu2<T> {
                 self.sha();
             }
             TAS_ABS_Y => {
-                info!("TAS_ABS_Y not supported yet");
+                self.s = self.a & self.x;
+                self.sha();
             }
             SHY_ABS_X => {
-                info!("SHY_ABS_X not supported yet");
+                self.shy();
             }
             SHX_ABS_X => {
-                info!("SHX_ABS_X not supported yet");
+                self.shx();
             }
 
             _ => { panic!("Should never happen, opcode:{:02X}", self.current_opcode); }
@@ -1737,6 +1993,19 @@ impl<T: Memory> Cpu2<T> {
         self.pending_interrupt = Some((0xfffa, 0xfffb));
     }
 
+    pub fn cancel_nmi(&mut self) {
+        if self.pending_interrupt == Some((0xfffa, 0xfffb)) {
+            self.pending_interrupt = None;
+        }
+        if self.latched_vector == Some((0xfffa, 0xfffb)) {
+            self.latched_vector = None;
+        }
+        if self.poll_snapshot_vector == Some((0xfffa, 0xfffb)) {
+            self.poll_snapshot_vector = None;
+            self.poll_snapshot = false;
+        }
+    }
+
     pub fn irq(&mut self) {
         debug!(target: "cpu", "IRQ received");
         // IRQ must not overwrite a pending NMI (NMI has higher priority)
@@ -1746,14 +2015,15 @@ impl<T: Memory> Cpu2<T> {
         }
     }
 
-    fn handle_interrupt_full(&mut self, brk: bool, low: u16, high: u16) {
-        self.current_cycle = 2;
-        while self.current_cycle <= 7 {
-            self.handle_interrupt(brk, low, high);
-            self.current_cycle += 1;
+    /// The IRQ line went high (the level detector was acknowledged). A pending
+    /// NMI is left alone: it is a queued event, not the IRQ line.
+    pub fn clear_irq(&mut self) {
+        match self.pending_interrupt {
+            Some((0xfffe, _)) => { self.pending_interrupt = None; }
+            _ => {}
         }
-        self.current_cycle = 1;
     }
+
 
     fn asl(&mut self, v: u8) -> u8 {
         self.p.set_c(v & 0x80 != 0);
@@ -1794,9 +2064,9 @@ impl<T: Memory> Cpu2<T> {
             }
             6 => {
                 //         6   $FFFE   R  fetch PCL
-                // NMI-BRK hijacking: if an NMI was detected during BRK execution,
+                // NMI hijacking: if an NMI was detected during BRK/IRQ execution,
                 // use the NMI vector instead of the IRQ/BRK vector.
-                let effective_low = if brk && self.pending_interrupt == Some((0xfffa, 0xfffb)) {
+                let effective_low = if self.latched_vector == Some((0xfffa, 0xfffb)) {
                     0xfffau16
                 } else {
                     low
@@ -1805,15 +2075,20 @@ impl<T: Memory> Cpu2<T> {
             }
             7 => {
                 //         7   $FFFF   R  fetch PCH
-                // NMI-BRK hijacking: use NMI vector hi byte and consume the pending NMI.
-                let hijacked = brk && self.pending_interrupt == Some((0xfffa, 0xfffb));
+                // NMI hijacking: use NMI vector hi byte and consume the pending NMI.
+                let hijacked = self.latched_vector == Some((0xfffa, 0xfffb));
                 let effective_high = if hijacked { 0xfffbu16 } else { high };
                 let h = (self.memory.get(effective_high) as u16) << 8;
                 self.set_pc(self.low_byte as u16 | h);
                 if hijacked {
-                    // The NMI was consumed by the BRK hijack; don't fire it again.
+                    // The NMI was consumed by the hijack; don't fire it again.
+                    self.pending_interrupt = None;
+                } else if low == 0xfffa {
                     self.pending_interrupt = None;
                 }
+                self.irq_poll = false;
+                self.latched_vector = None;
+                self.hardware_interrupt = None;
                 self.finished = true;
             }
             _ => if self.current_cycle != 1 {
@@ -1878,8 +2153,42 @@ impl<T: Memory> Cpu2<T> {
     }
 
     fn sha(&mut self) {
-        let high = (self.current_address >> 8) as u8;
-        let value = self.a & self.x & high.wrapping_add(1);
+        let h = self.base_high.wrapping_add(1);
+        let value = if self.dma_on_previous_cycle {
+            self.a & self.x
+        } else {
+            self.a & self.x & h
+        };
+        if self.page_crossed {
+            let new_high = value;
+            self.memory.set((self.current_address & 0x00FF) | ((new_high as u16) << 8), value);
+        } else {
+            self.memory.set(self.current_address, value);
+        }
+    }
+
+    fn shy(&mut self) {
+        let h = self.base_high.wrapping_add(1);
+        let value = if self.dma_on_previous_cycle {
+            self.y
+        } else {
+            self.y & h
+        };
+        if self.page_crossed {
+            let new_high = value;
+            self.memory.set((self.current_address & 0x00FF) | ((new_high as u16) << 8), value);
+        } else {
+            self.memory.set(self.current_address, value);
+        }
+    }
+
+    fn shx(&mut self) {
+        let h = self.base_high.wrapping_add(1);
+        let value = if self.dma_on_previous_cycle {
+            self.x
+        } else {
+            self.x & h
+        };
         if self.page_crossed {
             let new_high = value;
             self.memory.set((self.current_address & 0x00FF) | ((new_high as u16) << 8), value);
@@ -1945,6 +2254,12 @@ impl<T: Memory> Cpu2<T> {
         result.is_get_phase = state.is_get_phase;
         result
     }
+
+    pub fn memory(&mut self) -> &mut T { &mut self.memory }
+    pub fn is_get_phase(&self) -> bool { self.is_get_phase }
+    pub fn set_get_phase(&mut self, value: bool) { self.is_get_phase = value; }
+    pub fn get_cycles(&self) -> usize { self.current_cycle }
+    pub fn add_cycles(&mut self, cycles: u16) { self.current_cycle += cycles as usize; }
 }
 
 pub struct CpuState {
